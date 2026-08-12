@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Saída CommonJS, consumida pela API NestJS e pelo worker via require().
+    // `node16` no lugar de `commonjs`/`node`: o par antigo sai no TypeScript 7,
+    // e como `dist/cjs/package.json` declara `"type": "commonjs"`, o formato
+    // emitido continua sendo o mesmo.
+    "noEmit": false,
+    "module": "node16",
+    "moduleResolution": "node16",
+    "outDir": "dist/cjs",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"]
+}

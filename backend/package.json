@@ -1,0 +1,40 @@
+{
+  "name": "@disparoy/backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API REST, worker de disparo e webhook da Evolution",
+  "scripts": {
+    "build": "nest build",
+    "dev": "nest start --watch",
+    "dev:worker": "nest start --watch --path tsconfig.worker.json --entryFile worker/main.worker",
+    "start": "node dist/main.js",
+    "start:worker": "node dist/worker/main.worker.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@disparoy/dominio": "*",
+    "@nestjs/common": "^11.0.5",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.5",
+    "@nestjs/platform-express": "^11.0.5",
+    "@nestjs/throttler": "^6.5.0",
+    "@supabase/supabase-js": "^2.48.1",
+    "jose": "^5.9.6",
+    "pg-boss": "^10.1.5",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.2",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.2"
+  }
+}

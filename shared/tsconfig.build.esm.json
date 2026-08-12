@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    /**
+     * Saída ESM, consumida pelo Vite.
+     *
+     * Só o build ESM emite os .d.ts: com CommonJS, o `export *` do index vira
+     * `__exportStar()` em tempo de execução, que o Rollup não consegue ler
+     * estaticamente — o build do frontend quebra dizendo que um export "não
+     * existe". Em ESM os re-exports continuam analisáveis.
+     */
+    "noEmit": false,
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "declaration": true,
+    "outDir": "dist/esm",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"]
+}

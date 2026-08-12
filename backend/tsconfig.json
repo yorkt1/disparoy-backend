@@ -1,0 +1,51 @@
+{
+  "compilerOptions": {
+    // `node16` em vez de `commonjs`: o TypeScript exige o par com a resolução
+    // abaixo. Como `backend/package.json` não declara `"type": "module"`, todo
+    // arquivo daqui continua sendo CommonJS — a saída é a mesma de antes.
+    "module": "node16",
+    "declaration": false,
+    "removeComments": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "target": "ES2023",
+    "sourceMap": true,
+    "outDir": "./dist",
+    /**
+     * Explícito de propósito.
+     *
+     * Sem isto o TypeScript deduz a raiz a partir dos arquivos compilados: no
+     * dia em que alguém adicionasse um arquivo fora de `src/`, a saída inteira
+     * viraria `dist/src/…` e o `npm start` quebraria com "Cannot find module".
+     * Fixado, esse dia vira um erro de compilação em vez de um deploy quebrado.
+     */
+    "rootDir": "./src",
+    "incremental": true,
+    /**
+     * O cache mora DENTRO de `dist`, junto do que ele descreve.
+     *
+     * O `nest-cli.json` tem `deleteOutDir: true`. Com o cache do lado de fora
+     * (o padrão, em `backend/tsconfig.tsbuildinfo`), `nest build` apagava a
+     * saída e o cache seguia afirmando que tudo já fora emitido: o build
+     * terminava com código 0 e um `dist/` contendo só os arquivos alterados
+     * desde a última vez. O `npm start` então morria com "Cannot find module".
+     * Guardado aqui, cache e saída são apagados juntos e não têm como divergir
+     * — é o mesmo arranjo que o tsconfig.worker.json já usava.
+     */
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
+    "skipLibCheck": true,
+    "strict": true,
+    "strictNullChecks": true,
+    "noImplicitAny": true,
+    "forceConsistentCasingInFileNames": true,
+    // `node` (node10) também sai no TS 7. `node16` é o sucessor para quem roda
+    // em Node: respeita o campo `exports`, que é como o @disparoy/dominio
+    // aponta a build CommonJS para cá e a ESM para o frontend.
+    "moduleResolution": "node16",
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

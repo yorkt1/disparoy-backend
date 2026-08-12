@@ -1,0 +1,19 @@
+node_modules/
+dist/
+dist-worker/
+build/
+coverage/
+
+# Segredos. Só os .env.example são versionados.
+.env
+.env*.local
+
+*.tsbuildinfo
+*.log
+npm-debug.log*
+
+.DS_Store
+.vercel
+
+# Permissões e caminhos absolutos da máquina de quem editou.
+.claude/settings.local.json

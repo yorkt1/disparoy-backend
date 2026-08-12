@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    /**
+     * Saída própria do worker.
+     *
+     * A API roda `nest start --watch` sobre `dist/` e apaga o diretório a cada
+     * recompilação. Se o worker compilasse no mesmo lugar, um derrubaria o
+     * outro — o sintoma é a API morrendo com `Cannot find module './app.module'`.
+     */
+    "outDir": "./dist-worker",
+    "tsBuildInfoFile": "./dist-worker/.tsbuildinfo"
+  }
+}

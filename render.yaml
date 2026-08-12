@@ -1,0 +1,90 @@
+# Blueprint do Render: New > Blueprint apontando para este repositório cria os
+# dois serviços de uma vez.
+#
+# São DOIS processos de verdade, não um só com redundância. A API aceita e
+# agenda campanhas; quem envia mensagem é o worker. Só a API no ar significa
+# campanha criada e nada saindo — sem nenhum erro visível na tela.
+#
+# `type: worker` não existe no plano gratuito do Render. Se o worker recusar a
+# criação, é isso: o plano precisa ser pago.
+
+envVarGroups:
+  # Credenciais que API e worker compartilham, preenchidas uma vez só no painel.
+  # `sync: false` é justamente o que mantém o valor fora do Git: o Render cria a
+  # chave vazia e espera você colar o segredo lá.
+  - name: disparoy-segredos
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      # Ignora RLS. Só API e worker podem tê-la — nunca o navegador.
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Assina os tokens de login. Trocar derruba todas as sessões abertas.
+      # Gere com: openssl rand -hex 32
+      - key: JWT_SECRET
+        sync: false
+      # SESSION pooler, porta 5432. O TRANSACTION pooler (6543) não serve: o
+      # pg-boss usa LISTEN/NOTIFY e advisory locks, que ele não repassa.
+      - key: DATABASE_URL
+        sync: false
+      - key: EVOLUTION_API_URL
+        sync: false
+      - key: EVOLUTION_API_KEY
+        sync: false
+      # Valida POST /api/webhooks/evolution, que é público por natureza.
+      # Gere com: openssl rand -hex 32
+      - key: EVOLUTION_WEBHOOK_SECRET
+        sync: false
+
+services:
+  - type: web
+    name: disparoy-api
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    # `--include=dev` é obrigatório: o Render define NODE_ENV=production, e sem
+    # as devDependencies não existem nest CLI nem tsc para o build rodar.
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm run start:api
+    # Rota @Publico(), leve e sem sessão — verifica o banco de passagem.
+    healthCheckPath: /api/saude
+    envVars:
+      - fromGroup: disparoy-segredos
+      - key: NODE_ENV
+        value: production
+      # Domínio do painel na Vercel, ex.: https://disparoy.vercel.app
+      # Sem isto o CORS barra o front inteiro. Aceita vários, separados por vírgula.
+      - key: ORIGENS_PERMITIDAS
+        sync: false
+      # URL pública DESTA API, ex.: https://disparoy-api.onrender.com
+      # É o que a Evolution registra para entregar os webhooks de status.
+      - key: APP_URL_PUBLICA
+        sync: false
+      # Não há auto-cadastro: este admin nasce no boot e cria os demais acessos.
+      # Preenchidos juntos, ou a API recusa subir. Criado uma vez só.
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_SENHA
+        sync: false
+      - key: ADMIN_NOME
+        sync: false
+      # Opcional: só o botão "Gerar variações". Sem a chave ele responde 503.
+      - key: GROQ_API_KEY
+        sync: false
+
+  - type: worker
+    name: disparoy-worker
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm run start:worker
+    envVars:
+      - fromGroup: disparoy-segredos
+      - key: NODE_ENV
+        value: production
+      # Envios simultâneos por canal. Subir demais é convite a bloqueio.
+      - key: DISPARO_CONCORRENCIA_POR_CANAL
+        value: "1"
