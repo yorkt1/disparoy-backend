@@ -2,7 +2,7 @@ import "reflect-metadata";
 import { Logger, RequestMethod } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
-import { ambiente, origensPermitidas } from "./config/ambiente";
+import { ambiente, origemPermitida, origensPermitidas } from "./config/ambiente";
 import { FiltroExcecoes } from "./comum/excecoes.filter";
 
 async function iniciar() {
@@ -14,11 +14,17 @@ async function iniciar() {
   app.setGlobalPrefix("api", { exclude: [{ path: "/", method: RequestMethod.GET }] });
   app.useGlobalFilters(new FiltroExcecoes());
   app.enableCors({
-    origin: origensPermitidas(),
+    // Callback, e não a lista crua, porque as entradas aceitam `*` — sem isso
+    // cada deploy novo da Vercel exigiria editar a variável no painel.
+    // Requisição sem Origin (curl, health check do Render, webhook) passa: CORS
+    // é regra de navegador, e barrar aqui não protege nada.
+    origin: (origem: string | undefined, callback: (erro: Error | null, ok: boolean) => void) =>
+      callback(null, !origem || origemPermitida(origem)),
     credentials: true,
     // O frontend manda o JWT do Supabase aqui.
     allowedHeaders: ["Content-Type", "Authorization"],
   });
+  Logger.log(`CORS liberado para: ${origensPermitidas().join(", ")}`, "Bootstrap");
   app.enableShutdownHooks();
 
   await app.listen(env.PORT);

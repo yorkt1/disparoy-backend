@@ -167,3 +167,28 @@ export function origensPermitidas(): string[] {
     .map((o) => o.trim())
     .filter(Boolean);
 }
+
+/**
+ * Compila uma entrada de ORIGENS_PERMITIDAS em regex ancorada.
+ *
+ * O `*` existe por causa da Vercel: cada deploy gera um domínio novo
+ * (`disparoy-frontend-<hash>-<time>.vercel.app`), então uma lista de origens
+ * exatas envelhece a cada publicação. `https://disparoy-frontend-*.vercel.app`
+ * cobre todos eles.
+ *
+ * O curinga é `[^./]*` de propósito, e não `.*`: sem isso
+ * `https://*.vercel.app` casaria com `https://vercel.app.invasor.com` e com
+ * subdomínios de terceiros — o curinga vale para UM rótulo do host, só.
+ */
+function paraRegex(padrao: string): RegExp {
+  const partes = padrao.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${partes.join("[^./]*")}$`);
+}
+
+let padroesCache: RegExp[] | null = null;
+
+/** Se a origem do navegador está liberada, considerando os curingas. */
+export function origemPermitida(origem: string): boolean {
+  padroesCache ??= origensPermitidas().map(paraRegex);
+  return padroesCache.some((p) => p.test(origem));
+}

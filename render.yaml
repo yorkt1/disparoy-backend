@@ -55,6 +55,8 @@ services:
         value: production
       # Domínio do painel na Vercel, ex.: https://disparoy.vercel.app
       # Sem isto o CORS barra o front inteiro. Aceita vários, separados por vírgula.
+      # `*` cobre UM rótulo do host, para as URLs que a Vercel troca a cada
+      # deploy: https://disparoy.vercel.app,https://disparoy-frontend-*.vercel.app
       - key: ORIGENS_PERMITIDAS
         sync: false
       # URL pública DESTA API, ex.: https://disparoy-api.onrender.com
