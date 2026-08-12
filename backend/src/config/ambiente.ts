@@ -9,11 +9,26 @@ import { z } from "zod";
 /** Modelo de uso geral da Groq, quando o .env não escolhe outro. */
 const MODELO_GROQ_PADRAO = "llama-3.3-70b-versatile";
 
+/** Origem do Vite em desenvolvimento, quando o .env não lista outras. */
+const ORIGENS_PADRAO = "http://localhost:5173";
+
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().default(3333),
-  /** Origens liberadas no CORS, separadas por vírgula. */
-  ORIGENS_PERMITIDAS: z.string().default("http://localhost:5173"),
+  /**
+   * Origens liberadas no CORS, separadas por vírgula.
+   *
+   * Vazia cai no padrão em vez de virar lista vazia: `.default()` só vale para
+   * a chave AUSENTE, e a chave existir vazia é o estado natural aqui — é o que
+   * o `.env.example` traz e o que `sync: false` cria no painel do Render. Sem
+   * este transform, `ORIGENS_PERMITIDAS=` bloqueia o front inteiro no CORS,
+   * com a API subindo saudável e o erro aparecendo só no console do navegador.
+   */
+  ORIGENS_PERMITIDAS: z
+    .string()
+    .trim()
+    .default(ORIGENS_PADRAO)
+    .transform((v) => v || ORIGENS_PADRAO),
 
   // --- Supabase -----------------------------------------------------------
   SUPABASE_URL: z.string().url(),

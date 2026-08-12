@@ -1,5 +1,5 @@
 import "reflect-metadata";
-import { Logger } from "@nestjs/common";
+import { Logger, RequestMethod } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
 import { ambiente, origensPermitidas } from "./config/ambiente";
@@ -9,7 +9,9 @@ async function iniciar() {
   const env = ambiente();
   const app = await NestFactory.create(AppModule, { bodyParser: true });
 
-  app.setGlobalPrefix("api");
+  // `/` fica de fora do prefixo: é o que o navegador abre ao colar a URL do
+  // serviço, e um "Cannot GET /" ali parece deploy quebrado. Só essa rota.
+  app.setGlobalPrefix("api", { exclude: [{ path: "/", method: RequestMethod.GET }] });
   app.useGlobalFilters(new FiltroExcecoes());
   app.enableCors({
     origin: origensPermitidas(),
