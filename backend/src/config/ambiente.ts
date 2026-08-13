@@ -161,10 +161,17 @@ export function segredoJwt(): Uint8Array {
   return segredoCache;
 }
 
+function normalizarOrigem(origem: string): string {
+  return origem
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/^(https?:\/\/[^/]+)(?:\/.*)?$/, "$1");
+}
+
 export function origensPermitidas(): string[] {
   return ambiente()
     .ORIGENS_PERMITIDAS.split(",")
-    .map((o) => o.trim())
+    .map((o) => normalizarOrigem(o))
     .filter(Boolean);
 }
 
@@ -189,6 +196,7 @@ let padroesCache: RegExp[] | null = null;
 
 /** Se a origem do navegador está liberada, considerando os curingas. */
 export function origemPermitida(origem: string): boolean {
+  const origemNormalizada = normalizarOrigem(origem);
   padroesCache ??= origensPermitidas().map(paraRegex);
-  return padroesCache.some((p) => p.test(origem));
+  return padroesCache.some((p) => p.test(origemNormalizada));
 }
