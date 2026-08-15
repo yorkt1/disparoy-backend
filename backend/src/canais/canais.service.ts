@@ -23,6 +23,7 @@ import {
   excluirInstancia,
 } from "../whatsapp/evolution-provider";
 import { gerarPlanilhaContatos } from "../contatos/planilha";
+import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 import { COLUNAS_CANAL, paraCanal, type LinhaCanal } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 
@@ -71,10 +72,13 @@ export class CanaisService {
    */
   async listar(usuario: UsuarioAutenticado): Promise<Canal[]> {
     if (usuario.papel === "admin") {
-      const { data, error } = await this.supabase
-        .tabela("canais")
-        .select(COLUNAS_CANAL)
-        .order("nome");
+      // `noEscopo` mesmo sendo admin: papel e empresa são coisas diferentes.
+      // Admin de UMA empresa vê todos os canais DELA; só a conta global
+      // (`empresaId` nulo) atravessa empresas.
+      const { data, error } = await noEscopo(
+        this.supabase.tabela("canais").select(COLUNAS_CANAL),
+        usuario,
+      ).order("nome");
       if (error) throw new Error(`Falha ao listar canais: ${error.message}`);
       return (data as unknown as LinhaCanal[]).map(paraCanal);
     }
@@ -93,11 +97,10 @@ export class CanaisService {
   }
 
   async obter(usuario: UsuarioAutenticado, id: string): Promise<Canal> {
-    const { data, error } = await this.supabase
-      .tabela("canais")
-      .select(COLUNAS_CANAL)
-      .eq("id", id)
-      .maybeSingle();
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("canais").select(COLUNAS_CANAL).eq("id", id),
+      usuario,
+    ).maybeSingle();
 
     if (error) throw new Error(`Falha ao carregar canal: ${error.message}`);
     if (!data) throw new NotFoundException("Canal não encontrado.");
@@ -158,6 +161,7 @@ export class CanaisService {
         limite_diario: dados.limiteDiario || limiteSugerido(dados.estagioAquecimento),
         estagio_aquecimento: dados.estagioAquecimento,
         criado_por: usuario.id,
+        empresa_id: empresaParaEscrita(usuario),
       })
       .select(COLUNAS_CANAL)
       .single();

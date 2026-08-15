@@ -1,65 +1,42 @@
 import {
   BadRequestException,
-  Body,
   Controller,
-  Delete,
   Get,
-  HttpCode,
   HttpStatus,
-  Param,
   ParseFilePipeBuilder,
-  ParseUUIDPipe,
   Post,
-  Query,
   Res,
   UploadedFile,
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
-import { z } from "zod";
-import {
-  EXTENSOES_PLANILHA,
-  LIMITES,
-  importacaoContatosSchema,
-  listaEntradaSchema,
-  optOutManualSchema,
-} from "@disparoy/dominio";
-import { IpOrigem, Usuario } from "../auth/usuario.decorator";
-import type { UsuarioAutenticado } from "../auth/auth.guard";
+import { EXTENSOES_PLANILHA, LIMITES } from "@disparoy/dominio";
 import { Publico } from "../auth/publico.decorator";
-import { ValidacaoZodPipe } from "../comum/validacao.pipe";
 import { ErroPlanilha, gerarPlanilhaModelo, lerPlanilha } from "./planilha";
-import { ContatosService, type ConsultaContatos } from "./contatos.service";
 
+/**
+ * O que sobrou de contatos depois que o cadastro deixou de existir.
+ *
+ * O público vive dentro da campanha, vindo de planilha ou colagem — não há mais
+ * base a listar, importar ou excluir. Ficaram só as duas rotas que servem esse
+ * fluxo:
+ *
+ *  - `ler-planilha`, que apenas PARSEIA o arquivo e devolve as linhas. Nada é
+ *    gravado; a montagem dos contatos acontece no cliente, com as funções do
+ *    domínio.
+ *  - `modelo`, o arquivo em branco com o cabeçalho certo.
+ *
+ * O opt-out não está aqui porque deixou de ser operação sobre um contato: ele
+ * chega pelo webhook, ou pela tela da campanha, e vive em `opt_outs`.
+ */
 @Controller()
 export class ContatosController {
-  constructor(private readonly contatos: ContatosService) {}
-
-  // --- Contatos -----------------------------------------------------------
-
-  @Get("contatos")
-  listar(
-    @Usuario() usuario: UsuarioAutenticado,
-    @Query("pagina") pagina?: string,
-    @Query("porPagina") porPagina?: string,
-    @Query("busca") busca?: string,
-    @Query("situacao") situacao?: string,
-  ) {
-    return this.contatos.listar(usuario, {
-      pagina: pagina ? Number(pagina) : undefined,
-      porPagina: porPagina ? Number(porPagina) : undefined,
-      busca,
-      situacao: situacao as ConsultaContatos["situacao"],
-    });
-  }
-
   /**
    * Lê a planilha e devolve as linhas normalizadas.
    *
    * Só o parse acontece aqui — a montagem dos contatos roda no cliente, para o
-   * mapeamento de colunas recalcular sem novo upload. Nada é gravado nesta
-   * etapa: sem consentimento declarado, não existe contato.
+   * mapeamento de colunas recalcular sem novo upload.
    */
   @Post("contatos/ler-planilha")
   @UseInterceptors(FileInterceptor("arquivo", { limits: { fileSize: LIMITES.maxBytesPlanilha } }))
@@ -84,42 +61,6 @@ export class ContatosController {
     }
   }
 
-  @Post("contatos/importar")
-  importar(
-    @Usuario() usuario: UsuarioAutenticado,
-    @Body(new ValidacaoZodPipe(importacaoContatosSchema))
-    corpo: z.infer<typeof importacaoContatosSchema>,
-    @IpOrigem() ip: string,
-  ) {
-    return this.contatos.importar(usuario, corpo, ip);
-  }
-
-  @Post("contatos/:id/opt-out")
-  @HttpCode(200)
-  async optOut(
-    @Usuario() usuario: UsuarioAutenticado,
-    @Param("id", ParseUUIDPipe) id: string,
-    @Body(new ValidacaoZodPipe(optOutManualSchema)) corpo: z.infer<typeof optOutManualSchema>,
-    @IpOrigem() ip: string,
-  ) {
-    // `obter` no escopo do usuário: sem isso, mandar o id de um contato de
-    // outra empresa devolveria o telefone dela para a linha seguinte.
-    const alvo = await this.contatos.obter(usuario, id);
-    const registrado = await this.contatos.registrarOptOut(usuario, alvo.telefone, corpo.motivo, ip);
-    return { registrado };
-  }
-
-  @Delete("contatos/:id")
-  @HttpCode(200)
-  async excluir(
-    @Usuario() usuario: UsuarioAutenticado,
-    @Param("id", ParseUUIDPipe) id: string,
-    @IpOrigem() ip: string,
-  ) {
-    await this.contatos.excluir(usuario, id, ip);
-    return { excluido: id };
-  }
-
   /**
    * Planilha-modelo. Pública porque é um `<a download>` do navegador, que não
    * envia o header Authorization — e o conteúdo é estático.
@@ -135,32 +76,5 @@ export class ContatosController {
         "Cache-Control": "public, max-age=3600",
       })
       .send(Buffer.from(gerarPlanilhaModelo()));
-  }
-
-  // --- Listas -------------------------------------------------------------
-
-  @Get("listas")
-  async listarListas(@Usuario() usuario: UsuarioAutenticado) {
-    return { listas: await this.contatos.listarListas(usuario) };
-  }
-
-  @Post("listas")
-  async criarLista(
-    @Usuario() usuario: UsuarioAutenticado,
-    @Body(new ValidacaoZodPipe(listaEntradaSchema)) corpo: z.infer<typeof listaEntradaSchema>,
-    @IpOrigem() ip: string,
-  ) {
-    return { lista: await this.contatos.criarLista(usuario, corpo, ip) };
-  }
-
-  @Delete("listas/:id")
-  @HttpCode(200)
-  async excluirLista(
-    @Usuario() usuario: UsuarioAutenticado,
-    @Param("id", ParseUUIDPipe) id: string,
-    @IpOrigem() ip: string,
-  ) {
-    await this.contatos.excluirLista(usuario, id, ip);
-    return { excluido: id };
   }
 }

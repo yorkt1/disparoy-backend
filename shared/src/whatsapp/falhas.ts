@@ -233,7 +233,19 @@ export function classificarEvolution(status: number, detalhe: string): CodigoFal
   }
   if (/mediatype|media|mimetype|file|upload/.test(d)) return "midia_invalida";
 
-  return status >= 400 ? "conteudo_recusado" : "desconhecido";
+  /*
+   * 4xx sem regra que case é DESCONHECIDO, não "conteúdo recusado".
+   *
+   * O fallback antigo rotulava todo 4xx não reconhecido como
+   * `conteudo_recusado` — um palpite de aparência confiante. O efeito colateral
+   * era pior que o erro em si: essas falhas nunca apareciam no balde "sem
+   * classificação", então a Cobertura da Taxonomia marcava 100% enquanto parte
+   * dela era chute, e a tela de Diagnóstico deixava de apontar exatamente as
+   * regras que faltavam escrever.
+   *
+   * `desconhecido` é honesto e mostra o texto bruto para virar regra nova.
+   */
+  return "desconhecido";
 }
 
 /**
@@ -261,5 +273,6 @@ export function classificarMeta(status: number, detalhe: string): CodigoFalha {
   }
   if (/media|mime|file|upload/.test(d)) return "midia_invalida";
 
-  return status >= 400 ? "conteudo_recusado" : "desconhecido";
+  // Mesmo raciocínio da Evolution: chute confiante esconde a regra que falta.
+  return "desconhecido";
 }

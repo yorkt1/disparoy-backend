@@ -12,12 +12,13 @@ export class TemplatesController {
 
   @Get()
   async listar(
+    @Usuario() usuario: UsuarioAutenticado,
     @Query("categoria") categoria?: string,
     @Query("status") status?: string,
     @Query("busca") busca?: string,
   ) {
     return {
-      templates: await this.templates.listar({
+      templates: await this.templates.listar(usuario, {
         categoria: categoria as CategoriaTemplate | "todas" | undefined,
         status: status as StatusTemplate | "todos" | undefined,
         busca,

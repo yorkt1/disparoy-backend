@@ -28,8 +28,14 @@ alter table campanha_contatos alter column contato_id drop not null;
  * entrar mil vezes na campanha e receber mil mensagens.
  *
  * O telefone é o que identifica o destinatário agora, e é ele que trava.
+ *
+ * O nome traz `unico` de propósito: já existe um `campanha_contatos_telefone_idx`
+ * NÃO único, de `(telefone, processado_em)`, criado por outra migration. Como
+ * `if not exists` casa por NOME e não por definição, reusar aquele nome fazia
+ * este comando não criar nada — em silêncio, sem erro, deixando a campanha sem
+ * trava alguma contra destinatário repetido.
  */
-create unique index if not exists campanha_contatos_telefone_idx
+create unique index if not exists campanha_contatos_unico_telefone_idx
   on campanha_contatos (campanha_id, telefone);
 
 -- ---------------------------------------------------------------------------
@@ -128,21 +134,44 @@ declare
 begin
   select empresa_id into v_empresa from campanhas where id = p_campanha_id;
 
+  /*
+   * O `distinct on` NÃO é redundante com o `on conflict`.
+   *
+   * Com o mesmo telefone repetido na entrada, `on conflict do nothing` insere
+   * uma das linhas e descarta as outras — mas qual delas sobrevive não é
+   * definido pelo Postgres. Na prática a última venceu, e ela costuma ser a
+   * versão pobre: a planilha repete o número numa linha sem as colunas extras,
+   * e as variáveis do template chegariam vazias, fazendo `{{cidade}}` sumir do
+   * texto sem erro nenhum.
+   *
+   * Com `with ordinality` + `distinct on ... order by ord`, a PRIMEIRA
+   * ocorrência vence, sempre.
+   */
+  with entrada as (
+    select
+      e.valor->>'telefone'                        as telefone,
+      coalesce(e.valor->'variaveis', '{}'::jsonb) as variaveis,
+      e.ord
+    from jsonb_array_elements(p_publico) with ordinality as e(valor, ord)
+  ),
+  unicos as (
+    select distinct on (telefone) telefone, variaveis
+      from entrada
+     where telefone is not null
+       and telefone <> ''
+     order by telefone, ord
+  )
   insert into campanha_contatos (campanha_id, contato_id, telefone, variaveis)
-  select
-    p_campanha_id,
-    null,
-    p.telefone,
-    coalesce(p.variaveis, '{}'::jsonb)
-  from jsonb_to_recordset(p_publico) as p(telefone text, nome text, variaveis jsonb)
-  where p.telefone is not null
-    and p.telefone <> ''
-    -- Quem pediu para sair não entra, nem que venha na planilha.
-    and not exists (
-      select 1 from opt_outs o
-       where o.telefone = p.telefone
-         and (v_empresa is null or o.empresa_id = v_empresa)
-    )
+  select p_campanha_id, null, u.telefone, u.variaveis
+    from unicos u
+   -- Quem pediu para sair não entra, nem que venha na planilha.
+   where not exists (
+     select 1 from opt_outs o
+      where o.telefone = u.telefone
+        and (v_empresa is null or o.empresa_id = v_empresa)
+   )
+  -- Casa com `campanha_contatos_unico_telefone_idx`. Continua valendo para
+  -- reexecução da mesma campanha, que o `distinct on` não cobre.
   on conflict (campanha_id, telefone) do nothing;
 
   get diagnostics v_inseridos = row_count;

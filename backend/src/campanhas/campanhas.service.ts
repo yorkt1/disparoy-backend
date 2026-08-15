@@ -22,6 +22,7 @@ import {
   type LinhaContatoCampanha,
 } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
+import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 
 export interface ConsultaCampanhas {
   pagina?: number;
@@ -43,16 +44,22 @@ export class CampanhasService {
   // Leitura
   // ------------------------------------------------------------------------
 
-  async listar(q: ConsultaCampanhas = {}): Promise<Paginado<ResumoCampanha>> {
+  async listar(
+    usuario: UsuarioAutenticado,
+    q: ConsultaCampanhas = {},
+  ): Promise<Paginado<ResumoCampanha>> {
     const pagina = Math.max(q.pagina ?? 1, 1);
     const porPagina = Math.min(Math.max(q.porPagina ?? 10, 5), 100);
     const de = (pagina - 1) * porPagina;
 
-    let consulta = this.supabase
-      .tabela("campanhas")
-      .select(COLUNAS_CAMPANHA, { count: "exact" })
-      .order("criada_em", { ascending: false })
-      .range(de, de + porPagina - 1);
+    let consulta = noEscopo(
+      this.supabase
+        .tabela("campanhas")
+        .select(COLUNAS_CAMPANHA, { count: "exact" })
+        .order("criada_em", { ascending: false })
+        .range(de, de + porPagina - 1),
+      usuario,
+    );
 
     if (q.status && q.status !== "todas") consulta = consulta.eq("status", q.status);
     if (q.busca) consulta = consulta.ilike("nome", `%${q.busca.replace(/[,()]/g, " ")}%`);
@@ -70,12 +77,11 @@ export class CampanhasService {
     };
   }
 
-  async obter(id: string): Promise<Campanha> {
-    const { data, error } = await this.supabase
-      .tabela("campanhas")
-      .select(COLUNAS_CAMPANHA)
-      .eq("id", id)
-      .maybeSingle();
+  async obter(usuario: UsuarioAutenticado, id: string): Promise<Campanha> {
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("campanhas").select(COLUNAS_CAMPANHA).eq("id", id),
+      usuario,
+    ).maybeSingle();
 
     if (error) throw new Error(`Falha ao carregar campanha: ${error.message}`);
     if (!data) throw new NotFoundException("Campanha não encontrada.");
@@ -83,7 +89,16 @@ export class CampanhasService {
   }
 
   /** Amostra de contatos: a tela de detalhes mostra os primeiros, não os 20 mil. */
-  async amostraDeContatos(id: string, limite = 50): Promise<ContatoDaCampanha[]> {
+  async amostraDeContatos(
+    usuario: UsuarioAutenticado,
+    id: string,
+    limite = 50,
+  ): Promise<ContatoDaCampanha[]> {
+    // O escopo vem de `obter`, que confere o dono da campanha antes: filtrar
+    // `campanha_contatos` por empresa não é possível — a coluna não existe lá,
+    // e nem deve, porque o dono é a campanha.
+    await this.obter(usuario, id);
+
     const { data } = await this.supabase
       .tabela("campanha_contatos")
       .select("id, contato_id, telefone, status, motivo, variaveis, contatos(nome)")
@@ -94,22 +109,29 @@ export class CampanhasService {
     return ((data ?? []) as unknown as LinhaContatoCampanha[]).map(paraContatoDaCampanha);
   }
 
-  async metricasDashboard(): Promise<MetricasDashboard> {
+  async metricasDashboard(usuario: UsuarioAutenticado): Promise<MetricasDashboard> {
     const [campanhas, elegiveis, optOut] = await Promise.all([
-      this.supabase
-        .tabela("campanhas")
-        .select(
-          "iniciada_em, total_enviadas, total_entregues, total_lidas, total_falhas, total_respostas",
-        ),
-      this.supabase
-        .tabela("contatos")
-        .select("id", { count: "exact", head: true })
-        .eq("opt_in", true)
-        .is("opt_out_em", null),
-      this.supabase
-        .tabela("contatos")
-        .select("id", { count: "exact", head: true })
-        .not("opt_out_em", "is", null),
+      noEscopo(
+        this.supabase
+          .tabela("campanhas")
+          .select(
+            "iniciada_em, total_enviadas, total_entregues, total_lidas, total_falhas, total_respostas",
+          ),
+        usuario,
+      ),
+      /*
+       * "Contatos elegíveis" perdeu o sentido junto com o cadastro: não existe
+       * mais uma base a partir da qual escolher. O que sobrou de contável é
+       * quem pediu para sair, e ele vale como número de conformidade.
+       *
+       * Devolver 0 aqui é honesto; inventar a contagem de uma tabela que o
+       * produto não usa mais seria mostrar um número que não significa nada.
+       */
+      Promise.resolve({ count: 0 }),
+      noEscopo(
+        this.supabase.tabela("opt_outs").select("id", { count: "exact", head: true }),
+        usuario,
+      ),
     ]);
 
     const inicioDoDia = new Date();
@@ -186,7 +208,11 @@ export class CampanhasService {
         // `lista_id` continua na tabela pelas campanhas antigas, mas as novas
         // não têm lista: o público entra direto, vindo da planilha ou colagem.
         lista_id: null,
-        empresa_id: usuario.empresaId,
+        // `empresaParaEscrita`, não `usuario.empresaId`: a conta global tem
+        // empresa nula, e passá-la direto gravava NULL — furando o default da
+        // coluna e deixando a campanha sem dono, invisível para qualquer
+        // filtro por empresa. Recusar é o comportamento certo.
+        empresa_id: empresaParaEscrita(usuario),
         sequencia: dados.sequencia,
         intervalo_contatos_min: dados.intervaloEntreContatos.minSegundos,
         intervalo_contatos_max: dados.intervaloEntreContatos.maxSegundos,
@@ -264,7 +290,7 @@ export class CampanhasService {
   }
 
   async pausar(usuario: UsuarioAutenticado, id: string, ip: string): Promise<ResumoCampanha> {
-    const campanha = await this.obter(id);
+    const campanha = await this.obter(usuario, id);
     if (campanha.status !== "em_andamento" && campanha.status !== "agendada") {
       throw new ConflictException("Só é possível pausar campanha agendada ou em andamento.");
     }
@@ -308,7 +334,7 @@ export class CampanhasService {
 
   /** Retoma de onde parou: os contatos já enviados continuam marcados. */
   async retomar(usuario: UsuarioAutenticado, id: string, ip: string): Promise<ResumoCampanha> {
-    const campanha = await this.obter(id);
+    const campanha = await this.obter(usuario, id);
     /**
      * `pausada_por_canal` entra aqui junto com `pausada`.
      *

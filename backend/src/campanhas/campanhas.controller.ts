@@ -20,12 +20,13 @@ export class CampanhasController {
 
   @Get()
   listar(
+    @Usuario() usuario: UsuarioAutenticado,
     @Query("pagina") pagina?: string,
     @Query("porPagina") porPagina?: string,
     @Query("busca") busca?: string,
     @Query("status") status?: string,
   ) {
-    return this.campanhas.listar({
+    return this.campanhas.listar(usuario, {
       pagina: pagina ? Number(pagina) : undefined,
       porPagina: porPagina ? Number(porPagina) : undefined,
       busca,
@@ -34,15 +35,15 @@ export class CampanhasController {
   }
 
   @Get("metricas")
-  metricas() {
-    return this.campanhas.metricasDashboard();
+  metricas(@Usuario() usuario: UsuarioAutenticado) {
+    return this.campanhas.metricasDashboard(usuario);
   }
 
   @Get(":id")
-  async obter(@Param("id", ParseUUIDPipe) id: string) {
+  async obter(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {
     const [campanha, contatos] = await Promise.all([
-      this.campanhas.obter(id),
-      this.campanhas.amostraDeContatos(id),
+      this.campanhas.obter(usuario, id),
+      this.campanhas.amostraDeContatos(usuario, id),
     ]);
     return { campanha, contatos };
   }

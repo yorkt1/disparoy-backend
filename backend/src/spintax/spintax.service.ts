@@ -9,6 +9,7 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { paraSpintax, type LinhaSpintax } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
+import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 import { ErroGerador, gerarVariacoes, geradorConfigurado } from "./gerador";
 
 const COLUNAS = "id, nome, opcoes, criado_em";
@@ -20,11 +21,11 @@ export class SpintaxService {
     private readonly auditoria: AuditoriaService,
   ) {}
 
-  async listar(): Promise<Spintax[]> {
-    const { data, error } = await this.supabase
-      .tabela("spintax")
-      .select(COLUNAS)
-      .order("nome");
+  async listar(usuario: UsuarioAutenticado): Promise<Spintax[]> {
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("spintax").select(COLUNAS),
+      usuario,
+    ).order("nome");
 
     if (error) throw new Error(`Falha ao listar variações: ${error.message}`);
     return (data as unknown as LinhaSpintax[]).map(paraSpintax);
@@ -45,8 +46,17 @@ export class SpintaxService {
     const { data, error } = await this.supabase
       .tabela("spintax")
       .upsert(
-        { nome, opcoes: dados.opcoes, criado_por: usuario.id },
-        { onConflict: "nome" },
+        {
+          nome,
+          opcoes: dados.opcoes,
+          criado_por: usuario.id,
+          empresa_id: empresaParaEscrita(usuario),
+        },
+        // Por `(empresa_id, nome)`, casando com o índice criado na migration de
+        // empresas. Só por `nome`, a variação de uma empresa sobrescreveria a
+        // de outra que usasse o mesmo identificador — e `{{*saudacao*}}` é um
+        // nome que todo mundo escolhe.
+        { onConflict: "empresa_id,nome" },
       )
       .select(COLUNAS)
       .single();
@@ -112,10 +122,10 @@ export class SpintaxService {
   }
 
   async excluir(usuario: UsuarioAutenticado, id: string, ip: string): Promise<void> {
-    const { data, error } = await this.supabase
-      .tabela("spintax")
-      .delete()
-      .eq("id", id)
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("spintax").delete().eq("id", id),
+      usuario,
+    )
       .select(COLUNAS)
       .maybeSingle();
 

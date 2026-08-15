@@ -425,7 +425,17 @@ async function testarGroq() {
     headers: { Authorization: `Bearer ${chave}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: modelo,
-      messages: [{ role: "user", content: 'Responda {"ok":true} e nada mais.' }],
+      /*
+       * A palavra "json" precisa aparecer nas mensagens.
+       *
+       * Com `response_format: json_object`, a Groq recusa a requisição inteira
+       * se nenhuma mensagem mencionar json — HTTP 400, "'messages' must contain
+       * the word 'json' in some form". O prompt real do gerador diz "objeto
+       * JSON" e passa; este teste não dizia, e por isso acusava uma falha que
+       * não existia: o diagnóstico reportava o botão "Gerar variações" como
+       * quebrado enquanto ele funcionava normalmente.
+       */
+      messages: [{ role: "user", content: 'Responda em json: {"ok":true} e nada mais.' }],
       response_format: { type: "json_object" },
       max_completion_tokens: 32,
     }),

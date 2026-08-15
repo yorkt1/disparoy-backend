@@ -20,8 +20,8 @@ export class SpintaxController {
   constructor(private readonly spintax: SpintaxService) {}
 
   @Get()
-  async listar() {
-    return { spintax: await this.spintax.listar() };
+  async listar(@Usuario() usuario: UsuarioAutenticado) {
+    return { spintax: await this.spintax.listar(usuario) };
   }
 
   /**

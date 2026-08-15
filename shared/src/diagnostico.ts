@@ -85,3 +85,27 @@ export function totalSemClassificacao(falhas: ResumoFalha[]): number {
 export function totalDeFalhas(falhas: ResumoFalha[]): number {
   return falhas.reduce((s, f) => s + f.total, 0);
 }
+
+/**
+ * Abaixo disto a porcentagem não significa nada.
+ *
+ * Com uma falha só, "0% de cobertura" é aritmeticamente certo e informativamente
+ * falso: uma única linha vira um alarme vermelho do tamanho de uma regra
+ * quebrada. Vinte é onde a proporção começa a dizer algo sobre a tendência, em
+ * vez de sobre o acaso.
+ */
+export const AMOSTRA_MINIMA_COBERTURA = 20;
+
+export type NivelCobertura = "ok" | "atencao" | "amostra_pequena";
+
+/**
+ * Quão preocupante é a cobertura da taxonomia.
+ *
+ * Separado do cálculo do percentual porque a decisão "isto merece alarme?"
+ * depende do TAMANHO da amostra, não só da proporção — e essa é a parte que a
+ * tela errava.
+ */
+export function nivelDaCobertura(total: number, semClassificacao: number): NivelCobertura {
+  if (total < AMOSTRA_MINIMA_COBERTURA) return "amostra_pequena";
+  return semClassificacao / total >= 0.1 ? "atencao" : "ok";
+}
