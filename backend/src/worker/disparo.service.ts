@@ -6,7 +6,7 @@ import type {
   ResultadoEnvio,
   Spintax,
 } from "@disparoy/dominio";
-import { categoriaDe, explicar, paraCampanha } from "@disparoy/dominio";
+import { categoriaDe, explicar, paraCampanha, statusDoGateway } from "@disparoy/dominio";
 import { estadoDaInstancia } from "../whatsapp/evolution-provider";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
@@ -446,6 +446,11 @@ export class DisparoService {
    * parar de rodar justamente quando o sistema está ruim.
    */
   async manutencao(): Promise<void> {
+    // Antes de qualquer trabalho: o pulso responde "o worker está vivo?", e é
+    // o que permite ao painel avisar que nenhuma campanha está saindo. Bater no
+    // fim faria uma manutenção que falha no meio parecer worker morto.
+    await this.baterPulso();
+
     // Vem primeiro: reconciliar contatos de um canal que está offline só
     // devolveria trabalho para uma fila que não tem por onde sair.
     await this.vigiarCanais();
@@ -455,6 +460,18 @@ export class DisparoService {
     await this.concluirOrfas();
     await this.limparEventosAntigos();
     await this.limparAvisosAntigos();
+  }
+
+  /**
+   * Carimba o sinal de vida do worker.
+   *
+   * Falha aqui não interrompe a manutenção: perder um pulso é perder um aviso,
+   * enquanto abortar a rotina é perder a reconciliação inteira — que é o que de
+   * fato conserta campanha travada e canal mentindo.
+   */
+  private async baterPulso(): Promise<void> {
+    const { error } = await this.supabase.db.rpc("bater_pulso_worker");
+    if (error) this.logger.error(`Não foi possível bater o pulso: ${error.message}`);
   }
 
   /**
@@ -510,10 +527,11 @@ export class DisparoService {
       const estado = await estadoDaInstancia(canal.instancia_evolution);
 
       // Gateway mudo não muda NADA no banco. Não sabemos, e chutar aqui é
-      // exatamente o bug que este arquivo inteiro existe para corrigir.
-      if (estado === "indisponivel") continue;
-
-      const real = estado === "open" ? "conectado" : "desconectado";
+      // exatamente o bug que este arquivo inteiro existe para corrigir. A regra
+      // vem do domínio para não existir uma segunda cópia dela na verificação
+      // sob demanda da API.
+      const real = statusDoGateway(estado);
+      if (real === null) continue;
 
       await this.supabase
         .tabela("canais")

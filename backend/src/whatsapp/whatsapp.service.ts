@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import type {
   Canal,
   MensagemSequencia,
+  MetodoPareamento,
   ProvedorWhatsApp,
   ResultadoEnvio,
   Spintax,
@@ -52,8 +53,8 @@ export class WhatsappService {
     return provedorMetaCloud.listarTemplates();
   }
 
-  iniciarSessaoQr(canal: Canal) {
-    return provedorEvolution.iniciarSessao(canal);
+  iniciarSessaoQr(canal: Canal, opcoes?: { metodo?: MetodoPareamento; numero?: string }) {
+    return provedorEvolution.iniciarSessao(canal, opcoes);
   }
 
   async encerrarSessaoQr(canal: Canal): Promise<void> {

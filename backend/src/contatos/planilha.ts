@@ -103,6 +103,38 @@ export function lerPlanilha(buffer: ArrayBuffer | Uint8Array, nomeArquivo = ""):
  * Traz só o cabeçalho e uma linha de instrução — nada de contatos inventados,
  * que poderiam ser importados por engano junto com a base real.
  */
+/**
+ * Planilha com os contatos extraídos de um canal.
+ *
+ * Mesmo cabeçalho do modelo de importação (`nome`, `numero`) de propósito: o
+ * arquivo que sai daqui precisa poder voltar por cima sem ninguém renomear
+ * coluna nenhuma — extrair, editar no Excel e reimportar é o fluxo inteiro.
+ *
+ * O telefone vai como TEXTO. Em formato numérico o Excel transforma
+ * `+5548991237324` em notação científica e o número volta destruído da
+ * importação — é o erro clássico deste tipo de planilha.
+ */
+export function gerarPlanilhaContatos(
+  contatos: { nome: string; telefone: string }[],
+): Uint8Array {
+  const aba = XLSX.utils.aoa_to_sheet([
+    ["nome", "numero"],
+    ...contatos.map((c) => [c.nome, c.telefone]),
+  ]);
+
+  // `s` (string) em toda a coluna do número, inclusive nas linhas que só têm
+  // dígitos e que o XLSX classificaria como número sozinho.
+  for (let linha = 1; linha <= contatos.length; linha++) {
+    const ref = XLSX.utils.encode_cell({ r: linha, c: 1 });
+    if (aba[ref]) aba[ref].t = "s";
+  }
+
+  aba["!cols"] = [{ wch: 38 }, { wch: 20 }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, aba, "contatos");
+  return XLSX.write(workbook, { type: "array", bookType: "xlsx" }) as Uint8Array;
+}
+
 export function gerarPlanilhaModelo(): Uint8Array {
   const dados = [
     ["nome", "numero"],

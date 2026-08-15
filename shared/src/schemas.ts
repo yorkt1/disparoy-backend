@@ -102,7 +102,23 @@ export const optOutManualSchema = z.object({
 export const campanhaEntradaSchema = z
   .object({
     nome: z.string().trim().min(3).max(LIMITES.maxCaracteresNomeCampanha),
-    listaId: z.string().uuid({ message: "Selecione uma lista de contatos." }),
+    /**
+     * O público vive DENTRO da campanha.
+     *
+     * Substituiu `listaId`: não existe mais cadastro de contatos, e a lista de
+     * destino chega por planilha ou colagem no momento de criar. O telefone já
+     * vem normalizado em E.164 pelo domínio, dos dois lados.
+     */
+    publico: z
+      .array(
+        z.object({
+          telefone: z.string().regex(/^\+[1-9][0-9]{7,14}$/, "Telefone inválido."),
+          nome: z.string().trim().max(120).default(""),
+          variaveis: z.record(z.string()).default({}),
+        }),
+      )
+      .min(1, "Adicione ao menos um contato à campanha.")
+      .max(LIMITES.maxContatosPorImportacao),
     canaisIds: z.array(z.string().uuid()).min(1, "Selecione ao menos um canal."),
     sequencia: z
       .array(mensagemSequenciaSchema)
@@ -188,11 +204,54 @@ export const geracaoVariacoesSchema = z.object({
  * `tipoConexao` também não: por ora todo canal é QR Code. A coluna e o tipo
  * continuam existindo para quando a API Oficial voltar ao escopo.
  */
-export const canalEntradaSchema = z.object({
-  nome: z.string().trim().min(2).max(60),
-  limiteDiario: z.number().int().min(1).max(100_000).default(LIMITES.limiteDiarioNumeroNovo),
-  estagioAquecimento: z.number().int().min(0).max(3).default(0),
-});
+/**
+ * Pareamento por código exige o número; por QR, não.
+ *
+ * O `superRefine` amarra os dois campos em vez de deixar `numero` opcional
+ * solto: escolher "código" e não informar o número faria a Evolution devolver
+ * um 400 genérico já com o canal criado no banco — sobrando um canal órfão que
+ * ninguém consegue parear.
+ */
+export const canalEntradaSchema = z
+  .object({
+    nome: z.string().trim().min(2).max(60),
+    limiteDiario: z.number().int().min(1).max(100_000).default(LIMITES.limiteDiarioNumeroNovo),
+    estagioAquecimento: z.number().int().min(0).max(3).default(0),
+    metodoPareamento: z.enum(["qrcode", "codigo"]).default("qrcode"),
+    /** E.164 do celular que vai parear. Só no método `codigo`. */
+    numeroPareamento: z.string().trim().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.metodoPareamento !== "codigo") return;
+    if (!v.numeroPareamento) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["numeroPareamento"],
+        message: "Informe o número do WhatsApp que vai parear.",
+      });
+    }
+  });
+
+/**
+ * Reconexão: mesmo par de campos da criação, sem os dados do canal.
+ *
+ * Existe separado porque o método pode MUDAR entre uma tentativa e outra —
+ * quem tentou pelo QR e não tinha uma segunda tela troca para o código aqui.
+ */
+export const reconexaoCanalSchema = z
+  .object({
+    metodoPareamento: z.enum(["qrcode", "codigo"]).default("qrcode"),
+    numeroPareamento: z.string().trim().optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.metodoPareamento === "codigo" && !v.numeroPareamento) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["numeroPareamento"],
+        message: "Informe o número do WhatsApp que vai parear.",
+      });
+    }
+  });
 
 export const canalAjusteSchema = z.object({
   limiteDiario: z.number().int().min(1).max(100_000).optional(),

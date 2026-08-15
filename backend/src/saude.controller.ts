@@ -51,7 +51,7 @@ export class SaudeController {
 
   /** Dados da sessão para o topo do painel. */
   @Get("eu")
-  eu(@Usuario() usuario: UsuarioAutenticado) {
+  async eu(@Usuario() usuario: UsuarioAutenticado) {
     return {
       usuario: {
         id: usuario.id,
@@ -60,6 +60,34 @@ export class SaudeController {
         papel: usuario.papel,
       },
       integracao: this.whatsapp.estadoIntegracao(),
+      disparo: await this.estadoDisparo(),
     };
+  }
+
+  /**
+   * O worker está vivo?
+   *
+   * Fica em `/eu` e não em `/saude` pelo mesmo motivo que o estado das
+   * integrações: `/saude` é pública e não conta nada sobre o sistema. Quem
+   * precisa saber é o painel, que está autenticado.
+   *
+   * A manutenção roda de minuto em minuto. A tolerância de 3 minutos evita que
+   * um ciclo atrasado vire alarme falso, e ainda assim avisa antes de a
+   * primeira campanha ficar parada sem ninguém perceber.
+   */
+  private async estadoDisparo(): Promise<{ pulsoEm: string | null; ativo: boolean }> {
+    const { data, error } = await this.supabase
+      .tabela("worker_pulso")
+      .select("batida_em")
+      .eq("id", 1)
+      .maybeSingle();
+
+    // Tabela ausente (migration não aplicada) ou erro de leitura: reportar como
+    // inativo. Um alarme falso custa uma faixa a mais na tela; esconder um
+    // worker morto custa campanhas que nunca saem.
+    if (error || !data) return { pulsoEm: null, ativo: false };
+
+    const pulso = (data as { batida_em: string }).batida_em;
+    return { pulsoEm: pulso, ativo: Date.now() - new Date(pulso).getTime() < 3 * 60_000 };
   }
 }

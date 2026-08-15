@@ -44,6 +44,19 @@ export type StatusCanal = "conectado" | "desconectado" | "aguardando_qr" | "bani
 
 export type PermissaoCanal = "owner" | "operator" | "viewer";
 
+/**
+ * O que o gateway respondeu quando foi perguntado sobre a sessão.
+ *
+ * Mora neste módulo base, e não no do provedor, porque o painel precisa do
+ * mesmo vocabulário para renderizar — e `whatsapp/tipos.ts` já importa daqui,
+ * então o caminho contrário fecharia um ciclo.
+ *
+ * `indisponivel` NÃO é sinônimo de `close`. Um diz "não consegui perguntar"
+ * (problema nosso), o outro diz "perguntei, e a sessão caiu" (WhatsApp do
+ * cliente). Colapsar os dois é acusar o cliente de um defeito nosso.
+ */
+export type EstadoGateway = "open" | "close" | "connecting" | "indisponivel";
+
 export interface Canal {
   id: string;
   nome: string;
@@ -65,6 +78,20 @@ export interface Canal {
   enviadasHoje: number;
   solicitadoEm: string;
   conectadoEm: string | null;
+  /**
+   * O que o gateway respondeu na última vez em que foi PERGUNTADO.
+   *
+   * `status` acima é cache do webhook, e webhook é a primeira coisa que morre
+   * quando algo dá errado — VPS caída, webhook nunca registrado, evento perdido
+   * num 429. Estes dois campos existem para a tela poder dizer "conectado, e eu
+   * confirmei há 40 segundos" em vez de repetir um cache de três dias atrás
+   * como se fosse fato.
+   *
+   * Nulo significa NUNCA conferido. Não é o mesmo que desconectado, e a tela
+   * precisa tratar os dois de forma diferente.
+   */
+  estadoGateway: EstadoGateway | null;
+  estadoVerificadoEm: string | null;
   metaPhoneNumberId?: string;
 }
 
@@ -296,6 +323,8 @@ export type AcaoLog =
   | "campanha.iniciada"
   | "campanha.pausada"
   | "campanha.concluida"
+  /** Encerrada à força por ter ficado "em andamento" sem worker que a executasse. */
+  | "campanha.abandonada"
   | "campanha.rascunho_salvo"
   | "midia.upload"
   | "spintax.criado"
@@ -307,6 +336,8 @@ export type AcaoLog =
   | "template.criado"
   | "template.sincronizado"
   | "contatos.importados"
+  /** Agenda de um canal baixada em planilha — exportação de dado pessoal. */
+  | "contatos.extraidos"
   | "contato.opt_in"
   | "contato.opt_out"
   | "contato.excluido"

@@ -3,6 +3,7 @@ import type {
   Canal,
   Contato,
   ContatoDaCampanha,
+  EstadoGateway,
   Lista,
   LogAuditoria,
   MensagemSequencia,
@@ -66,7 +67,11 @@ export function paraUsuario(l: LinhaPerfil): Usuario {
 
 export const COLUNAS_CANAL =
   "id, nome, numero, instancia_evolution, tipo_conexao, status, limite_diario, " +
-  "estagio_aquecimento, enviadas_hoje, solicitado_em, conectado_em, meta_phone_number_id";
+  "estagio_aquecimento, enviadas_hoje, solicitado_em, conectado_em, meta_phone_number_id, " +
+  // Gravadas pela vigilância desde a migration de atribuição de falha, mas até
+  // aqui nunca lidas: o painel mostrava `status` — cache do webhook — como se
+  // fosse fato confirmado.
+  "estado_gateway, estado_verificado_em";
 
 export interface LinhaCanal {
   id: string;
@@ -81,6 +86,8 @@ export interface LinhaCanal {
   solicitado_em: string;
   conectado_em: string | null;
   meta_phone_number_id: string | null;
+  estado_gateway: EstadoGateway | null;
+  estado_verificado_em: string | null;
 }
 
 export function paraCanal(l: LinhaCanal): Canal {
@@ -96,6 +103,8 @@ export function paraCanal(l: LinhaCanal): Canal {
     enviadasHoje: l.enviadas_hoje,
     solicitadoEm: iso(l.solicitado_em)!,
     conectadoEm: iso(l.conectado_em),
+    estadoGateway: l.estado_gateway ?? null,
+    estadoVerificadoEm: iso(l.estado_verificado_em),
     metaPhoneNumberId: l.meta_phone_number_id ?? undefined,
   };
 }

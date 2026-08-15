@@ -183,7 +183,10 @@ export class CampanhasService {
       .insert({
         nome: dados.nome,
         status,
-        lista_id: dados.listaId,
+        // `lista_id` continua na tabela pelas campanhas antigas, mas as novas
+        // não têm lista: o público entra direto, vindo da planilha ou colagem.
+        lista_id: null,
+        empresa_id: usuario.empresaId,
         sequencia: dados.sequencia,
         intervalo_contatos_min: dados.intervaloEntreContatos.minSegundos,
         intervalo_contatos_max: dados.intervaloEntreContatos.maxSegundos,
@@ -208,8 +211,8 @@ export class CampanhasService {
      * antes de a mensagem existir, e nenhum caminho de código a contorna.
      */
     const { data: total, error: erroPopular } = await this.supabase.db.rpc(
-      "popular_contatos_da_campanha",
-      { p_campanha_id: campanhaId, p_lista_id: dados.listaId },
+      "popular_publico_da_campanha",
+      { p_campanha_id: campanhaId, p_publico: dados.publico },
     );
     if (erroPopular) throw new Error(`Falha ao carregar os contatos: ${erroPopular.message}`);
 
@@ -219,7 +222,7 @@ export class CampanhasService {
       // criaria uma campanha eternamente parada em 0%.
       await this.supabase.tabela("campanhas").update({ status: "rascunho" }).eq("id", campanhaId);
       throw new ConflictException(
-        "Nenhum contato da lista pode receber mensagem: todos estão sem consentimento ou pediram para sair.",
+        "Nenhum dos contatos pode receber mensagem: todos já pediram para sair.",
       );
     }
 

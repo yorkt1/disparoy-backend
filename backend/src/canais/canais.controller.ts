@@ -8,9 +8,17 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
+  Res,
 } from "@nestjs/common";
+import type { Response } from "express";
 import { z } from "zod";
-import { canalAjusteSchema, canalEntradaSchema, membroCanalSchema } from "@disparoy/dominio";
+import {
+  canalAjusteSchema,
+  canalEntradaSchema,
+  membroCanalSchema,
+  reconexaoCanalSchema,
+} from "@disparoy/dominio";
 import { IpOrigem, Usuario } from "../auth/usuario.decorator";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { SomenteAdmin } from "../auth/papel.decorator";
@@ -39,8 +47,28 @@ export class CanaisController {
 
   @Post(":id/reconectar")
   @HttpCode(200)
-  reconectar(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {
-    return this.canais.reconectar(usuario, id);
+  reconectar(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Body(new ValidacaoZodPipe(reconexaoCanalSchema))
+    corpo: z.infer<typeof reconexaoCanalSchema>,
+  ) {
+    return this.canais.reconectar(usuario, id, {
+      metodo: corpo.metodoPareamento,
+      numero: corpo.numeroPareamento,
+    });
+  }
+
+  /**
+   * Confere a sessão contra o gateway, sob demanda.
+   *
+   * Não é `@SomenteAdmin()`: quem opera o canal é quem descobre que ele caiu, e
+   * a rota só LÊ do gateway — o acesso ao canal já é conferido no serviço.
+   */
+  @Post(":id/verificar")
+  @HttpCode(200)
+  verificar(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {
+    return this.canais.verificar(usuario, id);
   }
 
   @Patch(":id")
@@ -53,6 +81,42 @@ export class CanaisController {
     return { canal: await this.canais.ajustar(usuario, id, corpo, ip) };
   }
 
+  /**
+   * Baixa a agenda do número em planilha.
+   *
+   * `@Res()` porque a resposta é binária, não JSON. Não é `@Publico()` como a
+   * rota do modelo: aquela serve um arquivo estático, esta devolve a agenda
+   * pessoal de alguém — e por isso o painel busca com o token e monta o
+   * download, em vez de usar um `<a download>` que não manda cabeçalho.
+   */
+  @Get(":id/contatos.xlsx")
+  async extrairContatos(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+    @Res() res: Response,
+  ) {
+    const { arquivo, nome, total } = await this.canais.extrairContatos(usuario, id, ip);
+    res
+      .status(200)
+      .set({
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename="${nome}"`,
+        // Lido pelo painel para avisar quantos vieram — o corpo é binário e
+        // não tem onde carregar esse número.
+        "X-Total-Contatos": String(total),
+        "Access-Control-Expose-Headers": "X-Total-Contatos",
+        "Cache-Control": "no-store",
+      })
+      .send(Buffer.from(arquivo));
+  }
+
+  /** Campanhas que dependem do canal — consultado antes de confirmar a exclusão. */
+  @Get(":id/vinculos")
+  async vinculos(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {
+    return { campanhas: await this.canais.vinculos(usuario, id) };
+  }
+
   @Delete(":id")
   @SomenteAdmin()
   @HttpCode(200)
@@ -60,8 +124,10 @@ export class CanaisController {
     @Usuario() usuario: UsuarioAutenticado,
     @Param("id", ParseUUIDPipe) id: string,
     @IpOrigem() ip: string,
+    /** `?forcar=true` desvincula as campanhas junto. A tela já confirmou. */
+    @Query("forcar") forcar?: string,
   ) {
-    await this.canais.excluir(usuario, id, ip);
+    await this.canais.excluir(usuario, id, ip, forcar === "true");
     return { excluido: id };
   }
 

@@ -5,10 +5,12 @@ import {
   classificarEvolution,
   type CodigoFalha,
   type EnvioSolicitado,
+  type EstadoGateway,
+  type MetodoPareamento,
   type ProvedorComQrCode,
   type ResultadoEnvio,
   type ResultadoValidacaoNumero,
-  type SessaoQrCode,
+  type SessaoPareamento,
 } from "@disparoy/dominio";
 
 /**
@@ -22,7 +24,14 @@ import {
 const CAMINHOS = {
   criarInstancia: () => `instance/create`,
   buscarInstancia: (i: string) => `instance/fetchInstances?instanceName=${encodeURIComponent(i)}`,
-  conectar: (i: string) => `instance/connect/${i}`,
+  /**
+   * Com `number`, a Evolution devolve `pairingCode` em vez de QR — é o mesmo
+   * endpoint, e o parâmetro é o que decide a forma do pareamento.
+   */
+  conectar: (i: string, numero?: string) =>
+    numero
+      ? `instance/connect/${i}?number=${encodeURIComponent(numero)}`
+      : `instance/connect/${i}`,
   estado: (i: string) => `instance/connectionState/${i}`,
   desconectar: (i: string) => `instance/logout/${i}`,
   excluir: (i: string) => `instance/delete/${i}`,
@@ -30,6 +39,7 @@ const CAMINHOS = {
   enviarTexto: (i: string) => `message/sendText/${i}`,
   enviarMidia: (i: string) => `message/sendMedia/${i}`,
   verificarNumeros: (i: string) => `chat/whatsappNumbers/${i}`,
+  buscarContatos: (i: string) => `chat/findContacts/${i}`,
 };
 
 /**
@@ -197,8 +207,13 @@ async function registrarWebhook(instancia: string): Promise<string | null> {
   }
 }
 
-/** O que o gateway respondeu sobre a sessão. */
-export type EstadoGateway = "open" | "close" | "connecting" | "indisponivel";
+/**
+ * Reexportado do domínio compartilhado, não redefinido aqui.
+ *
+ * O painel renderiza este mesmo estado, e duas definições da mesma união
+ * divergiriam no dia em que alguém acrescentasse um valor de um lado só.
+ */
+export type { EstadoGateway };
 
 /**
  * Estado REAL da sessão, perguntado ao gateway.
@@ -324,11 +339,24 @@ export const provedorEvolution: ProvedorComQrCode = {
    * webhook envia mensagens e nunca reporta status — a campanha ficaria presa
    * em "enviada" para sempre.
    */
-  async iniciarSessao(canal: Canal): Promise<SessaoQrCode> {
+  async iniciarSessao(
+    canal: Canal,
+    opcoes: { metodo?: MetodoPareamento; numero?: string } = {},
+  ): Promise<SessaoPareamento> {
     if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
 
+    const metodo: MetodoPareamento = opcoes.metodo ?? "qrcode";
+    if (metodo === "codigo" && !opcoes.numero) {
+      throw new ErroEvolution(
+        "Pareamento por código exige o número do WhatsApp.",
+        "canal_mal_configurado",
+      );
+    }
+
     const instancia = canal.instanciaEvolution;
-    const env = ambiente();
+    // A Evolution quer o número só com dígitos: o `+` do E.164 volta como
+    // "number is not valid" e derruba o pareamento inteiro.
+    const numero = opcoes.numero?.replace(/\D/g, "");
 
     await chamar(CAMINHOS.criarInstancia(), {
       method: "POST",
@@ -336,6 +364,9 @@ export const provedorEvolution: ProvedorComQrCode = {
         instanceName: instancia,
         qrcode: true,
         integration: "WHATSAPP-BAILEYS",
+        // Informado já na criação: a Evolution associa a instância ao número e
+        // é isso que permite ao `connect` devolver o código de pareamento.
+        ...(numero ? { number: numero } : {}),
       }),
       // A instância pode já existir de uma tentativa anterior; nesse caso a
       // Evolution devolve erro e seguimos direto para o connect.
@@ -343,9 +374,35 @@ export const provedorEvolution: ProvedorComQrCode = {
 
     const aviso = await registrarWebhook(instancia);
 
-    const r = await chamar<{ base64?: string; code?: string; qrcode?: { base64?: string } }>(
-      CAMINHOS.conectar(instancia),
-    );
+    const r = await chamar<{
+      base64?: string;
+      code?: string;
+      pairingCode?: string;
+      qrcode?: { base64?: string; pairingCode?: string };
+    }>(CAMINHOS.conectar(instancia, numero));
+
+    if (metodo === "codigo") {
+      const codigo = r.pairingCode ?? r.qrcode?.pairingCode ?? null;
+      // Sem código não há o que digitar. Falhar aqui é melhor que devolver uma
+      // tela vazia com o operador esperando um número que nunca vem.
+      if (!codigo) {
+        throw new ErroEvolution(
+          "A Evolution não retornou o código de pareamento. Confira se o número está correto.",
+          "canal_sem_sessao",
+        );
+      }
+      return {
+        canalId: canal.id,
+        metodo,
+        qr: null,
+        codigo,
+        // O código dura bem mais que o QR — a própria Evolution dá alguns
+        // minutos, e um teto curto demais faria a tela expirar antes da hora.
+        expiraEm: new Date(Date.now() + 180_000).toISOString(),
+        ...(aviso ? { aviso } : {}),
+      };
+    }
+
     const qr = r.base64 ?? r.qrcode?.base64 ?? r.code;
     // Sem QR não há o que escanear; devolver vazio renderizaria uma imagem
     // quebrada e o operador ficaria esperando por nada.
@@ -353,7 +410,9 @@ export const provedorEvolution: ProvedorComQrCode = {
 
     return {
       canalId: canal.id,
+      metodo,
       qr,
+      codigo: null,
       expiraEm: new Date(Date.now() + 60_000).toISOString(),
       ...(aviso ? { aviso } : {}),
     };
@@ -364,6 +423,86 @@ export const provedorEvolution: ProvedorComQrCode = {
     await chamar(CAMINHOS.desconectar(canal.instanciaEvolution), { method: "DELETE" });
   },
 };
+
+/** Um contato da agenda do WhatsApp, reduzido ao que vai para a planilha. */
+export interface ContatoDaAgenda {
+  nome: string;
+  /** E.164, com o `+`. */
+  telefone: string;
+}
+
+/**
+ * A agenda do número pareado.
+ *
+ * Serve para extrair, não para armazenar: a planilha sai daqui e o operador
+ * decide o que fazer com ela. Nada é gravado no banco.
+ *
+ * A Evolution mudou o formato desta resposta entre versões — às vezes um array
+ * cru, às vezes embrulhado em objeto — e o nome do contato aparece ora em
+ * `pushName`, ora em `name`. Ler as três formas custa pouco e evita que uma
+ * atualização do gateway devolva uma planilha vazia sem nenhum erro visível.
+ */
+export async function contatosDaInstancia(instancia: string): Promise<ContatoDaAgenda[]> {
+  if (!evolutionConfigurada()) {
+    throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
+  }
+
+  const bruto = await chamar<unknown>(CAMINHOS.buscarContatos(instancia), {
+    method: "POST",
+    body: JSON.stringify({ where: {} }),
+  });
+
+  return mapearAgenda(bruto);
+}
+
+/**
+ * Transforma a resposta crua da Evolution em contatos exportáveis.
+ *
+ * Separada de `contatosDaInstancia` para poder ser testada sem rede — a regra
+ * de quais JIDs entram já causou um bug real, com 11 linhas impossíveis de
+ * enviar dentro de uma planilha de 1815.
+ */
+export function mapearAgenda(bruto: unknown): ContatoDaAgenda[] {
+  const lista = Array.isArray(bruto)
+    ? bruto
+    : Array.isArray((bruto as { contacts?: unknown })?.contacts)
+      ? (bruto as { contacts: unknown[] }).contacts
+      : [];
+
+  const vistos = new Set<string>();
+  const contatos: ContatoDaAgenda[] = [];
+
+  for (const item of lista as Record<string, unknown>[]) {
+    const jid = String(item?.remoteJid ?? item?.id ?? "");
+
+    /*
+     * Lista de PERMISSÃO, não de bloqueio.
+     *
+     * A agenda real devolveu quatro tipos de JID: `s.whatsapp.net` (pessoas),
+     * `g.us` (grupos), `newsletter` (canais e packs de figurinhas) e `lid` — um
+     * identificador interno do WhatsApp que PARECE telefone e não é.
+     *
+     * Bloquear os conhecidos deixava `lid` e `newsletter` passarem, e eles
+     * viravam linhas com um "+número" que nenhuma campanha alcança. Como o
+     * WhatsApp segue inventando tipos novos, só o sufixo de pessoa entra.
+     */
+    if (!jid.endsWith("@s.whatsapp.net")) continue;
+
+    const digitos = jid.split("@")[0]?.replace(/\D/g, "") ?? "";
+    // `0@s.whatsapp.net` é a conta oficial do WhatsApp, que vem em toda agenda.
+    if (digitos.length < 10) continue;
+
+    const telefone = `+${digitos}`;
+    // A agenda repete o mesmo número em contatos diferentes com frequência.
+    if (vistos.has(telefone)) continue;
+    vistos.add(telefone);
+
+    const nome = String(item.pushName ?? item.name ?? item.verifiedName ?? "").trim();
+    contatos.push({ nome, telefone });
+  }
+
+  return contatos.sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+}
 
 /** Remove a instância na Evolution — usado ao excluir o canal. */
 export async function excluirInstancia(instancia: string): Promise<void> {
