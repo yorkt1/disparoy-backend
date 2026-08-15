@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="505" viewBox="0 0 680 505" font-family="Inter, Segoe UI, sans-serif">
+<style>.ts{font-size:12px}.th{font-size:14px;font-weight:500}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round"/></marker></defs>
+<rect x="170" y="40" width="340" height="56" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text class="th" x="340" y="66" text-anchor="middle" fill="#3C3489">Painel &#183; bot&#227;o Disparar</text>
+<text class="ts" x="340" y="84" text-anchor="middle" fill="#534AB7">POST /api/campanhas/:id/disparar</text>
+<path d="M340 96 L340 122" stroke="#888780" stroke-width="0.5" marker-end="url(#a)"/>
+<rect x="170" y="130" width="340" height="56" rx="4" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text class="th" x="340" y="156" text-anchor="middle" fill="#712B13">API &#183; CampanhasService</text>
+<text class="ts" x="340" y="174" text-anchor="middle" fill="#993C1D">grava o status e agenda o job</text>
+<path d="M340 186 L340 212" stroke="#888780" stroke-width="0.5" marker-end="url(#a)"/>
+<rect x="170" y="220" width="340" height="56" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text class="th" x="340" y="246" text-anchor="middle" fill="#085041">pg-boss no Postgres</text>
+<text class="ts" x="340" y="264" text-anchor="middle" fill="#0F6E56">o job espera aqui, n&#227;o na mem&#243;ria</text>
+<path d="M340 276 L340 302" stroke="#888780" stroke-width="0.5" marker-end="url(#a)"/>
+<rect x="170" y="310" width="340" height="56" rx="4" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text class="th" x="340" y="336" text-anchor="middle" fill="#712B13">Worker &#183; dois jobs</text>
+<text class="ts" x="340" y="354" text-anchor="middle" fill="#993C1D">planeja, depois envia contato a contato</text>
+<path d="M340 366 L340 392" stroke="#888780" stroke-width="0.5" marker-end="url(#a)"/>
+<rect x="170" y="400" width="340" height="56" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text class="th" x="340" y="426" text-anchor="middle" fill="#444441">Evolution &#183; sendText</text>
+<text class="ts" x="340" y="444" text-anchor="middle" fill="#5F5E5A">a mensagem sai para o WhatsApp</text>
+<rect x="40" y="475" width="10" height="10" rx="2" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/><text class="ts" x="56" y="484" fill="#5F5E5A">painel</text>
+<rect x="116" y="475" width="10" height="10" rx="2" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/><text class="ts" x="132" y="484" fill="#5F5E5A">nosso backend</text>
+<rect x="241" y="475" width="10" height="10" rx="2" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/><text class="ts" x="257" y="484" fill="#5F5E5A">Postgres</text>
+<rect x="331" y="475" width="10" height="10" rx="2" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/><text class="ts" x="347" y="484" fill="#5F5E5A">Evolution (terceiro)</text>
+</svg>

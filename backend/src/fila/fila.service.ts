@@ -10,9 +10,18 @@ import { ambiente } from "../config/ambiente";
 
 export const FILA_CAMPANHA = "disparo-campanha";
 export const FILA_CONTATO = "disparo-contato";
+/** Jobs que esgotaram as tentativas. Não são reprocessados: são evidência. */
+export const FILA_MORTOS = "disparo-mortos";
+/** Reconciliação, métricas e retenção. Disparada por cron do pg-boss. */
+export const FILA_MANUTENCAO = "manutencao";
 
 export interface JobCampanha {
   campanhaId: string;
+  /**
+   * Geração da execução. Job de rodada vencida é descartado ao acordar —
+   * é assim que pausar invalida o que já estava na fila.
+   */
+  rodada?: number;
 }
 
 export interface JobContato {
@@ -20,7 +29,25 @@ export interface JobContato {
   /** Id da linha em `campanha_contatos`, não do contato global. */
   contatoId: number;
   canalId: string;
+  rodada?: number;
 }
+
+/** Um contato pronto para virar job, com o atraso já sorteado. */
+export interface ContatoAgendado {
+  dados: JobContato;
+  atrasoSegundos: number;
+}
+
+/**
+ * Quantos jobs vão num único INSERT.
+ *
+ * O laço antigo fazia um `send()` por contato: 5.000 contatos eram 5.000 idas
+ * e voltas ao Postgres, e o job de planejamento levava minutos segurando a
+ * fila. Se o worker reiniciasse no meio, metade da campanha ficava sem job.
+ *
+ * 500 mantém o INSERT abaixo do limite de parâmetros do driver com folga.
+ */
+const TAMANHO_LOTE = 500;
 
 /**
  * Texto legível para a falha de conexão.
@@ -71,8 +98,13 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await boss.start();
-      await boss.createQueue(FILA_CAMPANHA);
-      await boss.createQueue(FILA_CONTATO);
+      await boss.createQueue(FILA_MORTOS);
+      await boss.createQueue(FILA_CAMPANHA, { name: FILA_CAMPANHA, deadLetter: FILA_MORTOS });
+      // Sem dead letter, um job que esgota as tentativas some do sistema: o
+      // contato fica pendente para sempre e ninguém descobre por quê. Aqui ele
+      // ao menos fica guardado, com o payload que falhou.
+      await boss.createQueue(FILA_CONTATO, { name: FILA_CONTATO, deadLetter: FILA_MORTOS });
+      await boss.createQueue(FILA_MANUTENCAO);
     } catch (e) {
       const motivo =
         `Não foi possível conectar a fila ao Postgres: ${descreverFalha(e)}\n\n` +
@@ -98,7 +130,10 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.boss?.stop({ graceful: true });
+    // Timeout explícito: o Render manda SIGKILL 30 s depois do SIGTERM, e um
+    // `stop` sem teto ficaria esperando o job de 25 h que nunca vai terminar.
+    // Perder o encerramento limpo é aceitável — o reaper recupera o contato.
+    await this.boss?.stop({ graceful: true, timeout: 20_000 }).catch(() => undefined);
   }
 
   /** True quando a API subiu sem fila (só possível com `FILA_OPCIONAL`). */
@@ -127,43 +162,74 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
       retryLimit: 3,
       retryDelay: 30,
       retryBackoff: true,
-      // Uma campanha só pode ter um job de início ativo por vez; sem isto, dois
-      // cliques em "Disparar" gerariam duas filas para os mesmos contatos.
-      singletonKey: dados.campanhaId,
-    });
-  }
-
-  /** Enfileira um contato, respeitando o intervalo sorteado antes dele. */
-  async agendarContato(dados: JobContato, atrasoSegundos: number): Promise<string | null> {
-    return this.exigirBoss().send(FILA_CONTATO, dados, {
-      startAfter: Math.max(atrasoSegundos, 0),
-      retryLimit: 2,
-      retryDelay: 60,
-      retryBackoff: true,
-      // Teto de tempo em execução, não de espera na fila: `startAfter` já pode
-      // ser de 25 h numa campanha grande e não conta aqui.
-      //
-      // 23 e não 24 porque o limite do pg-boss é exclusivo (`< 24`): com 24 o
-      // `send` lança AssertionError, e o job de planejamento morre no meio do
-      // laço — a campanha fica "em andamento" com todos os contatos pendentes
-      // e nada é enviado.
-      expireInHours: 23,
-      // Idempotência: reenfileirar o mesmo contato da mesma campanha não cria
-      // um segundo envio.
-      singletonKey: `${dados.campanhaId}:${dados.contatoId}`,
+      // Evita dois planejamentos simultâneos para a mesma campanha. Não é a
+      // garantia principal contra envio duplicado — essa é `enfileirado_em`,
+      // no banco: a chave do pg-boss é liberada assim que o job completa.
+      singletonKey: `${dados.campanhaId}:${dados.rodada ?? 0}`,
     });
   }
 
   /**
-   * Cancela os jobs pendentes de uma campanha (usado ao pausar).
+   * Enfileira contatos em lote, cada um com seu próprio atraso.
    *
-   * Sem fila não há job pendente para cancelar, então pausar continua valendo:
-   * bloquear o pause por causa da fila deixaria a campanha presa em andamento.
+   * Um INSERT por lote em vez de um round-trip por contato. Numa campanha de
+   * 5.000 pessoas isso é a diferença entre o planejamento levar segundos e
+   * levar minutos — e minutos aqui significam janela para o worker reiniciar
+   * no meio, deixando parte da campanha sem job nenhum.
    */
-  async cancelarCampanha(campanhaId: string): Promise<void> {
-    if (!this.boss) return;
-    await this.boss.deleteJob(FILA_CAMPANHA, campanhaId).catch(() => undefined);
-    this.logger.log(`Jobs pendentes da campanha ${campanhaId} cancelados.`);
+  async agendarContatosEmLote(contatos: ContatoAgendado[]): Promise<void> {
+    if (contatos.length === 0) return;
+    const boss = this.exigirBoss();
+    const agora = Date.now();
+
+    const jobs: PgBoss.JobInsert<JobContato>[] = contatos.map((c) => ({
+      name: FILA_CONTATO,
+      data: c.dados,
+      // `insert` quer instante absoluto; `send` aceitava deslocamento em
+      // segundos. Trocar sem converter agendaria tudo para agora.
+      startAfter: new Date(agora + Math.max(c.atrasoSegundos, 0) * 1000),
+      retryLimit: 2,
+      retryDelay: 60,
+      retryBackoff: true,
+      // Teto de tempo em EXECUÇÃO, não de espera na fila: `startAfter` já pode
+      // ser de 25 h numa campanha grande e não conta aqui.
+      expireInSeconds: 23 * 3600,
+      // Idempotência de enfileiramento, dentro da rodada. A trava real contra
+      // envio duplicado é `enfileirado_em`; esta só evita lixo na fila.
+      singletonKey: `${c.dados.campanhaId}:${c.dados.rodada ?? 0}:${c.dados.contatoId}`,
+    }));
+
+    for (let i = 0; i < jobs.length; i += TAMANHO_LOTE) {
+      await boss.insert(jobs.slice(i, i + TAMANHO_LOTE));
+    }
+  }
+
+  /**
+   * Rotinas periódicas: reconciliar travados, agregar métricas, limpar
+   * payloads antigos.
+   *
+   * Cron do próprio pg-boss, e não `setInterval` no processo: com duas
+   * instâncias de worker, `setInterval` rodaria a manutenção duas vezes em
+   * paralelo, e a reconciliação disputaria as mesmas linhas. O cron entrega o
+   * job a um worker só.
+   */
+  async agendarManutencao(): Promise<void> {
+    await this.exigirBoss().schedule(FILA_MANUTENCAO, "* * * * *", {}, { retryLimit: 0 });
+  }
+
+  /**
+   * Marca a campanha para replanejamento imediato.
+   *
+   * Usado pela manutenção quando a reconciliação devolveu contatos à fila:
+   * sem isto eles voltariam a `pendente` e ficariam lá, porque quem enfileira
+   * é o job de planejamento.
+   */
+  async replanejar(campanhaId: string, rodada: number): Promise<void> {
+    await this.exigirBoss().send(
+      FILA_CAMPANHA,
+      { campanhaId, rodada } satisfies JobCampanha,
+      { retryLimit: 3, retryDelay: 30, singletonKey: `replan:${campanhaId}:${rodada}` },
+    );
   }
 
   /**

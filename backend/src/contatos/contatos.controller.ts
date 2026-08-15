@@ -40,12 +40,13 @@ export class ContatosController {
 
   @Get("contatos")
   listar(
+    @Usuario() usuario: UsuarioAutenticado,
     @Query("pagina") pagina?: string,
     @Query("porPagina") porPagina?: string,
     @Query("busca") busca?: string,
     @Query("situacao") situacao?: string,
   ) {
-    return this.contatos.listar({
+    return this.contatos.listar(usuario, {
       pagina: pagina ? Number(pagina) : undefined,
       porPagina: porPagina ? Number(porPagina) : undefined,
       busca,
@@ -101,7 +102,9 @@ export class ContatosController {
     @Body(new ValidacaoZodPipe(optOutManualSchema)) corpo: z.infer<typeof optOutManualSchema>,
     @IpOrigem() ip: string,
   ) {
-    const alvo = await this.contatos.obter(id);
+    // `obter` no escopo do usuário: sem isso, mandar o id de um contato de
+    // outra empresa devolveria o telefone dela para a linha seguinte.
+    const alvo = await this.contatos.obter(usuario, id);
     const registrado = await this.contatos.registrarOptOut(usuario, alvo.telefone, corpo.motivo, ip);
     return { registrado };
   }
@@ -137,8 +140,8 @@ export class ContatosController {
   // --- Listas -------------------------------------------------------------
 
   @Get("listas")
-  async listarListas() {
-    return { listas: await this.contatos.listarListas() };
+  async listarListas(@Usuario() usuario: UsuarioAutenticado) {
+    return { listas: await this.contatos.listarListas(usuario) };
   }
 
   @Post("listas")

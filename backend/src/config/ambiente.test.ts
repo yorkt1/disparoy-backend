@@ -38,7 +38,7 @@ describe("origemPermitida", () => {
   it("aceita a origem real do frontend mesmo quando a env inclui barra final e caminho", async () => {
     setEnv("https://disparoy-frontend.vercel.app/entrar,https://disparoy-frontend-gh12-*.vercel.app,http://localhost:5173");
 
-    const { origemPermitida } = await import("./ambiente");
+    const { origemPermitida } = await import("./ambiente.js");
 
     expect(origemPermitida("https://disparoy-frontend.vercel.app")).toBe(true);
     expect(origemPermitida("https://disparoy-frontend-gh12-x.vercel.app")).toBe(true);
@@ -47,7 +47,7 @@ describe("origemPermitida", () => {
   it("rejeita origens fora da lista", async () => {
     setEnv("https://disparoy-frontend.vercel.app,https://disparoy-frontend-gh12-*.vercel.app,http://localhost:5173");
 
-    const { origemPermitida } = await import("./ambiente");
+    const { origemPermitida } = await import("./ambiente.js");
 
     expect(origemPermitida("https://malicioso.com")).toBe(false);
   });

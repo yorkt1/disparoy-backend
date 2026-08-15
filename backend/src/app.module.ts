@@ -16,6 +16,8 @@ import { MidiaModule } from "./midia/midia.module";
 import { CampanhasModule } from "./campanhas/campanhas.module";
 import { UsuariosModule } from "./usuarios/usuarios.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
+import { AvisosModule } from "./avisos/avisos.module";
+import { DiagnosticoModule } from "./diagnostico/diagnostico.module";
 import { SaudeController } from "./saude.controller";
 
 @Module({
@@ -43,6 +45,8 @@ import { SaudeController } from "./saude.controller";
     ContatosModule,
     MidiaModule,
     CampanhasModule,
+    AvisosModule,
+    DiagnosticoModule,
     UsuariosModule,
     WebhooksModule,
   ],

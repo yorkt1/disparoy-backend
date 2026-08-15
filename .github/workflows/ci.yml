@@ -1,0 +1,62 @@
+# ============================================================================
+# Verificação a cada push e pull request.
+#
+# Existe porque o Render faz deploy direto do `main`: sem nada entre o commit
+# e a produção, um erro de tipo ou um teste quebrado vira API fora do ar — e
+# se a API cai no meio de uma campanha de 25 horas, o disparo para junto.
+#
+# Roda o build ANTES do typecheck de propósito. O `@disparoy/dominio` é
+# consumido pelos arquivos de `dist/`, que são gitignorados: num clone limpo
+# eles não existem, e o `tsc` falha com TS2307 em dezenas de arquivos — o
+# mesmo erro que apareceria na Vercel e no Render.
+# ============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Push novo no mesmo branch cancela a execução anterior: o resultado dela já
+# não interessa, e é fila de runner desperdiçada.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Mesma versão do Render, lida do .nvmrc — uma fonte só.
+          node-version-file: .nvmrc
+          cache: npm
+
+      # `npm ci` e não `npm install`: respeita o lockfile e falha se ele
+      # estiver fora de sincronia com o package.json, que é justamente o
+      # estado que quebra o build do Render.
+      - name: Instalar
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Testes
+        run: npm test
+
+      # Rede de segurança boba e barata: um `.env` versionado entrega a
+      # service role do Supabase, que ignora RLS e abre o banco inteiro.
+      - name: Nenhum segredo versionado
+        run: |
+          if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$'; then
+            echo "::error::Arquivo .env versionado. Remova do índice e troque as credenciais."
+            exit 1
+          fi

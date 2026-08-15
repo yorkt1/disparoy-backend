@@ -216,7 +216,7 @@ export function paraSpintax(l: LinhaSpintax): Spintax {
 export const COLUNAS_CAMPANHA =
   "id, nome, status, lista_id, sequencia, intervalo_contatos_min, intervalo_contatos_max, " +
   "intervalo_mensagens_min, intervalo_mensagens_max, validar_numeros, agendada_para, " +
-  "criada_em, iniciada_em, concluida_em, template_principal, total_contatos, " +
+  "criada_em, iniciada_em, concluida_em, template_principal, pausada_motivo, total_contatos, " +
   "total_enviadas, total_entregues, total_lidas, total_falhas, total_respostas, " +
   "listas(nome), campanha_canais(canal_id)";
 
@@ -236,6 +236,7 @@ export interface LinhaCampanha {
   iniciada_em: string | null;
   concluida_em: string | null;
   template_principal: string | null;
+  pausada_motivo: string | null;
   total_contatos: number;
   total_enviadas: number;
   total_entregues: number;
@@ -272,6 +273,7 @@ function base(l: LinhaCampanha): Omit<Campanha, "sequencia"> {
     iniciadaEm: iso(l.iniciada_em),
     concluidaEm: iso(l.concluida_em),
     templatePrincipal: l.template_principal,
+    pausadaMotivo: l.pausada_motivo,
     metricas: {
       total: l.total_contatos,
       enviadas: l.total_enviadas,

@@ -1,4 +1,5 @@
 import { Controller, Get } from "@nestjs/common";
+import { SkipThrottle } from "@nestjs/throttler";
 import { Publico } from "./auth/publico.decorator";
 import { Usuario } from "./auth/usuario.decorator";
 import type { UsuarioAutenticado } from "./auth/auth.guard";
@@ -24,19 +25,28 @@ export class SaudeController {
   @Get()
   @Publico()
   raiz() {
-    return { mensagem: "talvez tenha alguma vulnerabilidade :)" };
+    return { servico: "ok" };
   }
 
-  /** Health check do Render: precisa ser leve e não exigir sessão. */
+  /**
+   * Health check do Render: leve, sem sessão e sem contar nada sobre o sistema.
+   *
+   * O estado das integrações saiu daqui de propósito. Esta rota é pública e a
+   * URL do serviço é adivinhável, e dizer qual provedor de WhatsApp está
+   * configurado é reconhecimento gratuito para quem estiver procurando alvo.
+   * Quem precisa dessa informação é o painel, e o painel está autenticado —
+   * ela vive em `/api/eu`.
+   *
+   * Fora do throttle: o Render bate aqui de poucos em poucos segundos, e o
+   * teto por IP existe para navegador, não para health check. Um 429 aqui faz
+   * o Render marcar o serviço como caído e reiniciar a API no meio do disparo.
+   */
   @Get("saude")
   @Publico()
+  @SkipThrottle()
   async saude() {
     const { error } = await this.supabase.tabela("perfis").select("id").limit(1);
-    return {
-      ok: !error,
-      banco: error ? "indisponivel" : "ok",
-      integracao: this.whatsapp.estadoIntegracao(),
-    };
+    return { ok: !error, banco: error ? "indisponivel" : "ok" };
   }
 
   /** Dados da sessão para o topo do painel. */

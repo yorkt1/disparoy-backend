@@ -16,6 +16,7 @@ import {
   type LinhaLista,
 } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
+import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 
 type Importacao = z.infer<typeof importacaoContatosSchema>;
 
@@ -41,16 +42,19 @@ export class ContatosService {
   // Contatos
   // ------------------------------------------------------------------------
 
-  async listar(q: ConsultaContatos = {}): Promise<Paginado<Contato>> {
+  async listar(usuario: UsuarioAutenticado, q: ConsultaContatos = {}): Promise<Paginado<Contato>> {
     const pagina = Math.max(q.pagina ?? 1, 1);
     const porPagina = Math.min(Math.max(q.porPagina ?? 25, 5), 200);
     const de = (pagina - 1) * porPagina;
 
-    let consulta = this.supabase
-      .tabela("contatos")
-      .select(COLUNAS_CONTATO, { count: "exact" })
-      .order("criado_em", { ascending: false })
-      .range(de, de + porPagina - 1);
+    let consulta = noEscopo(
+      this.supabase
+        .tabela("contatos")
+        .select(COLUNAS_CONTATO, { count: "exact" })
+        .order("criado_em", { ascending: false })
+        .range(de, de + porPagina - 1),
+      usuario,
+    );
 
     switch (q.situacao) {
       case "elegiveis":
@@ -91,6 +95,12 @@ export class ContatosService {
    * planilha atualiza nome e variáveis em vez de duplicar a pessoa. O que
    * NUNCA é sobrescrito é o `opt_out_em` — quem pediu para sair continua fora,
    * mesmo aparecendo de novo num arquivo.
+   *
+   * O conflito é por `(empresa_id, telefone)`, nunca só por telefone. Com a
+   * chave global, a segunda empresa a importar um número que a primeira já
+   * tinha não criava linha nova: ela ASSUMIA a linha da primeira, herdava nome,
+   * tags e variáveis, e a incluía nas próprias listas. Cada `empresa_id` daqui
+   * para baixo existe por causa disso.
    */
   async importar(
     usuario: UsuarioAutenticado,
@@ -102,9 +112,13 @@ export class ContatosService {
       throw new BadRequestException("Nenhum contato válido na importação.");
     }
 
-    // Quem já pediu saída não volta pela importação.
+    const empresaId = empresaParaEscrita(usuario);
+
+    // Quem já pediu saída não volta pela importação. A busca é no escopo da
+    // empresa: o opt-out de um contato de OUTRO cliente não diz nada sobre o
+    // consentimento que esta empresa registrou para o mesmo número.
     const telefones = validos.map((c) => c.telefone);
-    const jaExistentes = await this.buscarPorTelefones(telefones);
+    const jaExistentes = await this.buscarPorTelefones(empresaId, telefones);
     const saiu = new Set(
       jaExistentes.filter((c) => c.optOutEm !== null).map((c) => c.telefone),
     );
@@ -115,6 +129,7 @@ export class ContatosService {
 
     for (let i = 0; i < aGravar.length; i += TAMANHO_LOTE) {
       const lote = aGravar.slice(i, i + TAMANHO_LOTE).map((c) => ({
+        empresa_id: empresaId,
         telefone: c.telefone,
         nome: c.nome,
         tags: dados.tags,
@@ -128,12 +143,14 @@ export class ContatosService {
 
       const { error } = await this.supabase
         .tabela("contatos")
-        .upsert(lote, { onConflict: "telefone" });
+        .upsert(lote, { onConflict: "empresa_id,telefone" });
       if (error) throw new Error(`Falha ao gravar contatos: ${error.message}`);
     }
 
-    const listaId = await this.resolverLista(usuario, dados);
-    if (listaId) await this.vincularALista(listaId, aGravar.map((c) => c.telefone));
+    const listaId = await this.resolverLista(usuario, empresaId, dados);
+    if (listaId) {
+      await this.vincularALista(empresaId, listaId, aGravar.map((c) => c.telefone));
+    }
 
     const atualizados = aGravar.filter((c) => conhecidos.has(c.telefone)).length;
     const importados = aGravar.length - atualizados;
@@ -158,12 +175,11 @@ export class ContatosService {
     return { importados, atualizados, ignorados: saiu.size, listaId };
   }
 
-  async obter(id: string): Promise<Contato> {
-    const { data, error } = await this.supabase
-      .tabela("contatos")
-      .select(COLUNAS_CONTATO)
-      .eq("id", id)
-      .maybeSingle();
+  async obter(usuario: UsuarioAutenticado, id: string): Promise<Contato> {
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("contatos").select(COLUNAS_CONTATO).eq("id", id),
+      usuario,
+    ).maybeSingle();
 
     if (error) throw new Error(`Falha ao carregar contato: ${error.message}`);
     if (!data) throw new NotFoundException("Contato não encontrado.");
@@ -180,22 +196,37 @@ export class ContatosService {
     const normalizado = normalizarTelefone(telefone);
     if (!normalizado.valido) return false;
 
+    /*
+     * `p_empresa_id` nulo significa TODAS as empresas, e é o que o webhook usa:
+     * o pedido chega por WhatsApp sem que se resolva de qual canal veio. Para
+     * o opt-out essa é a direção segura — marcar demais tira alguém de uma
+     * campanha, marcar de menos manda mensagem para quem pediu para parar.
+     *
+     * Pelo painel a empresa é conhecida e vai junto: o clique de um cliente não
+     * pode apagar o consentimento que outro registrou para o mesmo número.
+     */
     const { data, error } = await this.supabase.db.rpc("registrar_opt_out", {
       p_telefone: normalizado.e164,
       p_motivo: motivo,
+      p_empresa_id: usuario?.empresaId ?? null,
     });
     if (error) throw new Error(`Falha ao registrar opt-out: ${error.message}`);
-    if (!data) return false; // já estava fora, ou telefone desconhecido
+    // Agora devolve QUANTAS linhas marcou: zero é "já estava fora, ou telefone
+    // desconhecido nesta empresa".
+    if (!data || Number(data) === 0) return false;
 
     await this.auditoria.registrar({
       usuarioId: usuario?.id ?? null,
       usuarioNome: usuario?.nome ?? "Sistema",
       acao: "contato.opt_out",
       tipoEntidade: "contato",
-      entidadeId: String(data),
+      // A função devolve uma contagem, não mais o id de um contato: o mesmo
+      // telefone pode existir em várias empresas e não há UMA entidade a
+      // apontar. O telefone no rótulo é o que identifica o caso na trilha.
+      entidadeId: null,
       entidadeRotulo: normalizado.e164,
       ip,
-      detalhes: { motivo },
+      detalhes: { motivo, contatosMarcados: Number(data) },
     });
 
     return true;
@@ -209,10 +240,10 @@ export class ContatosService {
    * liga aquele número a um cadastro.
    */
   async excluir(usuario: UsuarioAutenticado, id: string, ip: string): Promise<void> {
-    const { data, error } = await this.supabase
-      .tabela("contatos")
-      .delete()
-      .eq("id", id)
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("contatos").delete().eq("id", id),
+      usuario,
+    )
       .select("telefone")
       .maybeSingle();
 
@@ -235,11 +266,11 @@ export class ContatosService {
   // Listas
   // ------------------------------------------------------------------------
 
-  async listarListas(): Promise<Lista[]> {
-    const { data, error } = await this.supabase
-      .tabela("listas")
-      .select("id, nome, descricao, criada_em")
-      .order("criada_em", { ascending: false });
+  async listarListas(usuario: UsuarioAutenticado): Promise<Lista[]> {
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("listas").select("id, nome, descricao, criada_em"),
+      usuario,
+    ).order("criada_em", { ascending: false });
 
     if (error) throw new Error(`Falha ao listar listas: ${error.message}`);
     const linhas = (data ?? []) as unknown as LinhaLista[];
@@ -267,7 +298,12 @@ export class ContatosService {
   ): Promise<Lista> {
     const { data, error } = await this.supabase
       .tabela("listas")
-      .insert({ nome: dados.nome, descricao: dados.descricao, criado_por: usuario.id })
+      .insert({
+        nome: dados.nome,
+        descricao: dados.descricao,
+        criado_por: usuario.id,
+        empresa_id: empresaParaEscrita(usuario),
+      })
       .select("id, nome, descricao, criada_em")
       .single();
 
@@ -287,10 +323,10 @@ export class ContatosService {
   }
 
   async excluirLista(usuario: UsuarioAutenticado, id: string, ip: string): Promise<void> {
-    const { data, error } = await this.supabase
-      .tabela("listas")
-      .delete()
-      .eq("id", id)
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("listas").delete().eq("id", id),
+      usuario,
+    )
       .select("nome")
       .maybeSingle();
 
@@ -318,28 +354,48 @@ export class ContatosService {
   // Apoio
   // ------------------------------------------------------------------------
 
-  private async buscarPorTelefones(telefones: string[]): Promise<Contato[]> {
+  private async buscarPorTelefones(empresaId: string, telefones: string[]): Promise<Contato[]> {
     const encontrados: Contato[] = [];
     for (let i = 0; i < telefones.length; i += TAMANHO_LOTE) {
       const { data } = await this.supabase
         .tabela("contatos")
         .select(COLUNAS_CONTATO)
+        .eq("empresa_id", empresaId)
         .in("telefone", telefones.slice(i, i + TAMANHO_LOTE));
       encontrados.push(...((data ?? []) as unknown as LinhaContato[]).map(paraContato));
     }
     return encontrados;
   }
 
+  /**
+   * A lista de destino da importação.
+   *
+   * `dados.listaId` chega do cliente e por isso é CONFERIDO, não aceitado: sem
+   * esta checagem, bastava mandar o id de uma lista de outra empresa para
+   * despejar a própria importação dentro dela.
+   */
   private async resolverLista(
     usuario: UsuarioAutenticado,
+    empresaId: string,
     dados: Importacao,
   ): Promise<string | null> {
-    if (dados.listaId) return dados.listaId;
+    if (dados.listaId) {
+      const { data, error } = await this.supabase
+        .tabela("listas")
+        .select("id")
+        .eq("id", dados.listaId)
+        .eq("empresa_id", empresaId)
+        .maybeSingle();
+
+      if (error) throw new Error(`Falha ao conferir a lista: ${error.message}`);
+      if (!data) throw new NotFoundException("Lista não encontrada.");
+      return dados.listaId;
+    }
     if (!dados.novaLista) return null;
 
     const { data, error } = await this.supabase
       .tabela("listas")
-      .insert({ nome: dados.novaLista, criado_por: usuario.id })
+      .insert({ nome: dados.novaLista, criado_por: usuario.id, empresa_id: empresaId })
       .select("id")
       .single();
 
@@ -347,11 +403,19 @@ export class ContatosService {
     return (data as { id: string }).id;
   }
 
-  private async vincularALista(listaId: string, telefones: string[]): Promise<void> {
+  private async vincularALista(
+    empresaId: string,
+    listaId: string,
+    telefones: string[],
+  ): Promise<void> {
     for (let i = 0; i < telefones.length; i += TAMANHO_LOTE) {
+      // O `eq("empresa_id")` é o que impede o vínculo de pegar a linha do MESMO
+      // telefone pertencente a outra empresa — que era o caminho pelo qual o
+      // contato de um cliente acabava dentro da lista de outro.
       const { data } = await this.supabase
         .tabela("contatos")
         .select("id")
+        .eq("empresa_id", empresaId)
         .in("telefone", telefones.slice(i, i + TAMANHO_LOTE));
 
       const vinculos = ((data ?? []) as { id: string }[]).map((c) => ({

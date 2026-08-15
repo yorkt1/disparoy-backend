@@ -3,6 +3,8 @@ import type { CategoriaTemplate, StatusTemplate, Template } from "@disparoy/domi
 import { ambiente } from "../config/ambiente";
 import {
   CAPACIDADES,
+  classificarMeta,
+  type CodigoFalha,
   type EnvioSolicitado,
   type ProvedorComTemplates,
   type ResultadoEnvio,
@@ -43,15 +45,27 @@ async function chamarGraph<T>(
   caminho: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const resposta = await fetch(`https://graph.facebook.com/${cfg.versao}/${caminho}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${cfg.token}`,
-      "Content-Type": "application/json",
-      ...init.headers,
-    },
-    cache: "no-store",
-  });
+  let resposta: Response;
+  try {
+    resposta = await fetch(`https://graph.facebook.com/${cfg.versao}/${caminho}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        "Content-Type": "application/json",
+        ...init.headers,
+      },
+      cache: "no-store",
+      // Sem teto, um envio pendurado seguraria o job até o `expireInSeconds` de
+      // 23 h — a campanha inteira para sem ninguém saber por quê.
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (e) {
+    // Status 0: não houve resposta nenhuma. É o que distingue "a Graph API está
+    // fora do ar" de "a Meta recusou a mensagem", e antes as duas coisas
+    // viravam a mesma string sem código.
+    const detalhe = e instanceof Error ? e.message : String(e);
+    throw new ErroMeta(detalhe, classificarMeta(0, detalhe));
+  }
 
   const corpo = (await resposta.json().catch(() => ({}))) as {
     error?: { message?: string; code?: number };
@@ -59,7 +73,7 @@ async function chamarGraph<T>(
 
   if (!resposta.ok) {
     const detalhe = corpo.error?.message ?? `HTTP ${resposta.status}`;
-    throw new ErroMeta(detalhe, String(corpo.error?.code ?? resposta.status));
+    throw new ErroMeta(detalhe, classificarMeta(resposta.status, detalhe));
   }
   return corpo as T;
 }
@@ -67,7 +81,8 @@ async function chamarGraph<T>(
 export class ErroMeta extends Error {
   constructor(
     message: string,
-    readonly codigo: string,
+    /** Código do domínio, não o da Meta: é ele que a tela e o worker leem. */
+    readonly codigo: CodigoFalha,
   ) {
     super(message);
     this.name = "ErroMeta";
@@ -121,11 +136,15 @@ export const provedorMetaCloud: ProvedorComTemplates = {
         erro:
           "Credenciais da Meta ausentes: preencha META_WHATSAPP_TOKEN e " +
           "META_WHATSAPP_BUSINESS_ACCOUNT_ID em backend/.env.",
-        codigo: "meta_nao_configurada",
+        codigo: "provedor_nao_configurado",
       };
     }
     if (!envio.canal.metaPhoneNumberId) {
-      return { ok: false, erro: "Canal sem phone_number_id da Meta.", codigo: "sem_phone_id" };
+      return {
+        ok: false,
+        erro: "Canal sem phone_number_id da Meta.",
+        codigo: "canal_mal_configurado",
+      };
     }
     // A API oficial não aceita texto livre para iniciar conversa: o passo
     // precisa apontar para um template aprovado.
@@ -165,14 +184,11 @@ export const provedorMetaCloud: ProvedorComTemplates = {
       const id = r.messages?.[0]?.id;
       return id
         ? { ok: true, idExterno: id }
-        : { ok: false, erro: "A Meta não retornou id da mensagem." };
+        : { ok: false, erro: "A Meta não retornou id da mensagem.", codigo: "resposta_sem_id" };
     } catch (e) {
-      const erro = e instanceof ErroMeta ? e : null;
-      return {
-        ok: false,
-        erro: erro?.message ?? "Falha ao chamar a Graph API.",
-        codigo: erro?.codigo,
-      };
+      if (e instanceof ErroMeta) return { ok: false, erro: e.message, codigo: e.codigo };
+      const detalhe = e instanceof Error ? e.message : String(e);
+      return { ok: false, erro: detalhe, codigo: "desconhecido" };
     }
   },
 
@@ -190,7 +206,7 @@ export const provedorMetaCloud: ProvedorComTemplates = {
       throw new ErroMeta(
         "Credenciais da Meta ausentes: preencha META_WHATSAPP_TOKEN e " +
           "META_WHATSAPP_BUSINESS_ACCOUNT_ID em backend/.env para sincronizar.",
-        "meta_nao_configurada",
+        "provedor_nao_configurado",
       );
     }
 

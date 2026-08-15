@@ -1,4 +1,5 @@
 import type { Canal, MensagemSequencia, Template } from "../tipos.js";
+import type { CodigoFalha } from "./falhas.js";
 
 /**
  * Contrato único para os dois modos de envio.
@@ -39,7 +40,15 @@ export interface EnvioSolicitado {
  */
 export type ResultadoEnvio =
   | { ok: true; idExterno: string }
-  | { ok: false; erro: string; codigo?: string };
+  /**
+   * `codigo` é OBRIGATÓRIO de propósito.
+   *
+   * Enquanto era opcional, ele era calculado no provedor e descartado antes do
+   * insert em `mensagens_enviadas` — o dado que dizia de quem era a culpa
+   * existia por uma função e sumia na seguinte. Exigindo-o, o compilador aponta
+   * qualquer caminho de falha que esqueça de classificar.
+   */
+  | { ok: false; erro: string; codigo: CodigoFalha };
 
 export interface ResultadoValidacaoNumero {
   numero: string;
@@ -53,6 +62,15 @@ export interface SessaoQrCode {
   /** Data URL do QR ou o payload cru, conforme o gateway. */
   qr: string;
   expiraEm: string;
+  /**
+   * Problema que não impediu o pareamento, mas que o operador precisa saber.
+   *
+   * Hoje só um caso o preenche: o webhook não pôde ser registrado. É grave e
+   * silencioso — a instância conecta, envia normalmente e nunca reporta nada,
+   * nem entrega nem desconexão. O painel passa a mentir sobre o estado do canal
+   * sem que nenhum erro apareça em lugar nenhum.
+   */
+  aviso?: string;
 }
 
 export interface ProvedorWhatsApp {

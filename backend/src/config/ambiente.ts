@@ -129,6 +129,57 @@ const schema = z.object({
   .refine((v) => Boolean(v.ADMIN_EMAIL) === Boolean(v.ADMIN_SENHA), {
     path: ["ADMIN_SENHA"],
     message: "ADMIN_EMAIL e ADMIN_SENHA precisam ser preenchidos juntos.",
+  })
+  /**
+   * Em produção, o que é opcional em desenvolvimento vira obrigatório.
+   *
+   * Todos estes deixavam a API subir saudável e falhar em silêncio depois:
+   *
+   *  - sem `EVOLUTION_WEBHOOK_SECRET`, o endpoint de webhook recusa TUDO. Os
+   *    disparos saem normalmente e nenhum status volta: a campanha fica cheia
+   *    de "enviada" que nunca vira "entregue", e o opt-out de quem pediu para
+   *    sair nunca chega. Ninguém liga uma coisa na outra até alguém reclamar
+   *    de receber mensagem depois de ter pedido para parar.
+   *  - sem `APP_URL_PUBLICA`, a instância nem é registrada na Evolution — o
+   *    webhook nunca é chamado, mesmo com o segredo certo.
+   *  - sem `EVOLUTION_API_URL`/`KEY`, todo envio falha um a um, com a campanha
+   *    andando e cada contato marcado como falha.
+   *
+   * `FILA_OPCIONAL` entra na lista pelo motivo oposto: ele existe para deixar
+   * a API subir SEM fila, e uma API sem fila em produção aceita campanhas e
+   * não envia nenhuma.
+   */
+  .superRefine((v, ctx) => {
+    if (v.NODE_ENV !== "production") return;
+
+    const exigir = (campo: keyof typeof v, porque: string) => {
+      if (!v[campo]) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [campo], message: porque });
+      }
+    };
+
+    exigir("EVOLUTION_API_URL", "Obrigatório em produção: sem gateway, nenhum envio sai.");
+    exigir("EVOLUTION_API_KEY", "Obrigatório em produção: sem gateway, nenhum envio sai.");
+    exigir(
+      "EVOLUTION_WEBHOOK_SECRET",
+      "Obrigatório em produção: sem ele o webhook recusa tudo, e nenhum status " +
+        "de entrega nem pedido de saída (opt-out) é registrado.",
+    );
+    exigir(
+      "APP_URL_PUBLICA",
+      "Obrigatório em produção: é o endereço que a Evolution usa para entregar " +
+        "os webhooks. Sem ele a instância sobe sem webhook nenhum.",
+    );
+
+    if (v.FILA_OPCIONAL) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["FILA_OPCIONAL"],
+        message:
+          "Precisa ser false em produção: com true a API sobe sem fila e as " +
+          "campanhas são criadas sem nunca serem enviadas.",
+      });
+    }
   });
 
 export type Ambiente = z.infer<typeof schema>;

@@ -7,6 +7,7 @@ import {
   Post,
   UnauthorizedException,
 } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import { timingSafeEqual } from "node:crypto";
 import { Publico } from "../auth/publico.decorator";
 import { ambiente } from "../config/ambiente";
@@ -20,6 +21,28 @@ import { EvolutionService } from "./evolution.service";
  * um poderia forjar confirmação de entrega ou descadastrar contatos alheios.
  */
 @Controller("webhooks/evolution")
+/**
+ * Teto próprio, muito acima do global.
+ *
+ * O limite geral é 40 requisições por 10 s POR IP — desenhado para o navegador
+ * de um operador. Os eventos da Evolution vêm todos do MESMO IP (a VPS), e uma
+ * mensagem gera três ou quatro deles: SERVER_ACK, DELIVERY_ACK, READ. Um
+ * disparo em ritmo normal estoura o teto global em segundos.
+ *
+ * O que se perde num 429 aqui não é cosmético: é o status de entrega sumindo
+ * do relatório e, pior, o MESSAGES_UPSERT com pedido de saída sendo descartado.
+ * Alguém pede para sair, a Evolution leva 429 e o opt-out nunca é registrado —
+ * a próxima campanha alcança quem pediu para não ser alcançado.
+ *
+ * O limite continua existindo porque o endpoint é público: sem nenhum teto,
+ * quem descobrir a URL pode encher `eventos_webhook` até o banco acabar. O
+ * segredo compartilhado barra antes disso, mas o throttle é o que protege
+ * contra quem fica tentando adivinhá-lo.
+ */
+@Throttle({
+  curta: { ttl: 10_000, limit: 400 },
+  longa: { ttl: 60_000, limit: 2_000 },
+})
 export class EvolutionController {
   private readonly logger = new Logger(EvolutionController.name);
 

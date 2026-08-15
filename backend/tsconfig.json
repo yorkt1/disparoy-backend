@@ -46,6 +46,11 @@
     "moduleResolution": "node16",
     "resolveJsonModule": true
   },
+  /**
+   * Inclui os testes de propósito: é este arquivo que o editor e o
+   * `npm run typecheck` usam, e teste que não é verificado apodrece calado.
+   * Quem tira os testes da SAÍDA é o `tsconfig.build.json`.
+   */
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

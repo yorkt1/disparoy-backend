@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { ehPedidoDeSaida, normalizarTelefone } from "@disparoy/dominio";
+import { ehPedidoDeSaida, explicar, normalizarTelefone } from "@disparoy/dominio";
 import { SupabaseService } from "../supabase/supabase.service";
 import { numeroDaInstancia } from "../whatsapp/evolution-provider";
 import { ContatosService } from "../contatos/contatos.service";
@@ -28,8 +28,10 @@ interface PayloadEvolution {
   [k: string]: unknown;
 }
 
+export type StatusMensagem = "enfileirada" | "enviada" | "entregue" | "lida" | "falhou";
+
 /** Status da Evolution/Baileys → status do domínio. */
-const MAPA_STATUS: Record<string, "enviada" | "entregue" | "lida" | "falhou"> = {
+export const MAPA_STATUS: Record<string, Exclude<StatusMensagem, "enfileirada">> = {
   PENDING: "enviada",
   SERVER_ACK: "enviada",
   DELIVERY_ACK: "entregue",
@@ -37,6 +39,24 @@ const MAPA_STATUS: Record<string, "enviada" | "entregue" | "lida" | "falhou"> = 
   PLAYED: "lida",
   ERROR: "falhou",
 };
+
+/** Progressão natural de uma mensagem. `falhou` está fora: não é um estágio. */
+const PROGRESSAO: readonly StatusMensagem[] = ["enfileirada", "enviada", "entregue", "lida"];
+
+/**
+ * O status novo representa avanço em relação ao atual?
+ *
+ * A ordem de chegada dos webhooks não é garantida: a Evolution manda
+ * `DELIVERY_ACK` depois de `READ` com alguma frequência, e aplicar o mais
+ * recente que chegou faria uma mensagem lida voltar a "entregue" no relatório —
+ * o número de leituras cairia sozinho enquanto o operador olha a tela.
+ *
+ * `falhou` sempre passa: é estado terminal vindo do gateway, não um degrau.
+ */
+export function avancaStatus(atual: string, novo: StatusMensagem): boolean {
+  if (novo === "falhou") return true;
+  return PROGRESSAO.indexOf(novo) > PROGRESSAO.indexOf(atual as StatusMensagem);
+}
 
 @Injectable()
 export class EvolutionService {
@@ -153,6 +173,74 @@ export class EvolutionService {
     this.logger.log(
       `Canal ${instancia}: ${status}${atualizacao.numero ? ` (${String(atualizacao.numero)})` : ""}`,
     );
+
+    await this.reagirAConexao(canal.id, instancia, status);
+  }
+
+  /**
+   * Reação imediata à mudança de conexão.
+   *
+   * O watchdog do worker já detectaria isso em até um minuto, mas um minuto é
+   * tempo demais quando o disparo tem janela de dez: a campanha continuaria
+   * tentando enviar por um número que acabou de cair. Aqui a reação é na hora,
+   * e o watchdog vira a rede de segurança para quando o webhook não chegar.
+   *
+   * Nunca lança: isto roda no caminho do webhook, que precisa responder rápido
+   * e cujo payload já foi gravado. Falhar aqui não pode custar o evento.
+   */
+  private async reagirAConexao(
+    canalId: string,
+    instancia: string,
+    status: string,
+  ): Promise<void> {
+    try {
+      if (status === "conectado") {
+        await this.supabase.db.rpc("resolver_incidentes_do_canal", { p_canal_id: canalId });
+        // A retomada em si fica com o watchdog do worker: só ele tem a fila em
+        // mãos para reenfileirar o planejamento, e a API não deve depender dela.
+        return;
+      }
+
+      if (status !== "desconectado") return;
+
+      await this.supabase.db.rpc("abrir_incidente", {
+        p_categoria: "canal",
+        p_codigo: "canal_desconectado",
+        p_titulo: explicar("canal_desconectado", { canal: instancia }),
+        p_canal_id: canalId,
+        p_campanha_id: null,
+        p_detalhe: "CONNECTION_UPDATE reportou sessão fechada",
+      });
+
+      // Pausa toda campanha ativa que usa este canal. Sem isto, os jobs já
+      // enfileirados continuariam acordando e queimando contatos até alguém
+      // perceber.
+      const { data } = await this.supabase
+        .tabela("campanha_canais")
+        .select("campanha_id, campanhas(status)")
+        .eq("canal_id", canalId);
+
+      const alvos = ((data ?? []) as unknown as {
+        campanha_id: string;
+        campanhas: { status: string } | null;
+      }[]).filter((l) => l.campanhas?.status === "em_andamento");
+
+      for (const alvo of alvos) {
+        await this.supabase.db.rpc("pausar_campanha_por_canal", {
+          p_campanha_id: alvo.campanha_id,
+          p_canal_id: canalId,
+          p_motivo: explicar("canal_desconectado", { canal: instancia }),
+        });
+      }
+
+      if (alvos.length > 0) {
+        this.logger.warn(
+          `Canal ${instancia} caiu; ${alvos.length} campanha(s) pausadas imediatamente.`,
+        );
+      }
+    } catch (e) {
+      this.logger.error(`Falha ao reagir à conexão de ${instancia}: ${String(e)}`);
+    }
   }
 
   /**
@@ -177,10 +265,7 @@ export class EvolutionService {
     const linha = data as { id: number; campanha_id: string; status: string } | null;
     if (!linha) return;
 
-    const ordem = ["enfileirada", "enviada", "entregue", "lida"];
-    const atual = ordem.indexOf(linha.status);
-    const proposto = ordem.indexOf(novo);
-    if (novo !== "falhou" && proposto <= atual) return;
+    if (!avancaStatus(linha.status, novo)) return;
 
     const agora = new Date().toISOString();
     await this.supabase
@@ -192,9 +277,19 @@ export class EvolutionService {
       })
       .eq("id", linha.id);
 
-    await this.supabase.db.rpc("recalcular_metricas_campanha", {
-      p_campanha_id: linha.campanha_id,
-    });
+    /**
+     * Os contadores da campanha NÃO são recalculados aqui.
+     *
+     * Recalcular por evento significava um `count(*)` sobre todas as mensagens
+     * da campanha a cada ACK — três ou quatro por mensagem enviada. Numa
+     * campanha de 5 mil contatos são ~20 mil varreduras completas e ~20 mil
+     * UPDATEs na mesma linha de `campanhas`, todos disputando o mesmo lock, e
+     * tudo isso dentro do caminho de um webhook que precisa responder rápido.
+     *
+     * Quem agrega agora é a manutenção do worker, uma vez por minuto e para
+     * todas as campanhas ativas de uma vez. O painel atrasa até 60 s; o banco
+     * deixa de ser o gargalo do disparo.
+     */
   }
 
   /**
@@ -229,30 +324,21 @@ export class EvolutionService {
     }
   }
 
-  /** Credita a resposta à campanha mais recente que falou com este número. */
+  /**
+   * Credita a resposta à campanha mais recente que falou com este número.
+   *
+   * Uma RPC e não SELECT + UPDATE: ler o total e gravar `lido + 1` perde
+   * contagem quando duas pessoas respondem ao mesmo tempo — as duas leem o
+   * mesmo valor, as duas gravam o mesmo número, e uma resposta some do
+   * relatório. Numa campanha de disparo, respostas simultâneas é o caso comum,
+   * não o raro. Dentro da função o incremento é relativo à coluna, então o
+   * Postgres serializa e nada se perde.
+   */
   private async contarResposta(telefone: string): Promise<void> {
-    const { data } = await this.supabase
-      .tabela("campanha_contatos")
-      .select("campanha_id")
-      .eq("telefone", telefone)
-      .not("processado_em", "is", null)
-      .order("processado_em", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const linha = data as { campanha_id: string } | null;
-    if (!linha) return;
-
-    const { data: atual } = await this.supabase
-      .tabela("campanhas")
-      .select("total_respostas")
-      .eq("id", linha.campanha_id)
-      .maybeSingle();
-
-    await this.supabase
-      .tabela("campanhas")
-      .update({ total_respostas: ((atual as { total_respostas: number })?.total_respostas ?? 0) + 1 })
-      .eq("id", linha.campanha_id);
+    const { error } = await this.supabase.db.rpc("registrar_resposta", {
+      p_telefone: telefone,
+    });
+    if (error) this.logger.warn(`Não foi possível contar a resposta: ${error.message}`);
   }
 }
 

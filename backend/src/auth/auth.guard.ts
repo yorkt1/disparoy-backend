@@ -19,6 +19,17 @@ export interface UsuarioAutenticado {
   email: string;
   nome: string;
   papel: Papel;
+  /**
+   * Empresa dona do dado que este login enxerga.
+   *
+   * `null` é acesso global — a conta de administração, que atravessa todas as
+   * empresas. Quem consulta precisa tratar o `null` como "vê tudo"; tratá-lo
+   * como "empresa nenhuma" faria o admin não ver nada, e tratá-lo por engano
+   * como um valor comparável faria `.eq("empresa_id", null)` não casar com
+   * linha alguma — dois jeitos silenciosos de errar, por isso o tipo é
+   * explicitamente anulável.
+   */
+  empresaId: string | null;
 }
 
 declare module "express" {
@@ -96,7 +107,7 @@ export class AuthGuard implements CanActivate {
 
     const { data, error } = await this.supabase
       .tabela("perfis")
-      .select("id, nome, email, papel, ativo")
+      .select("id, nome, email, papel, ativo, empresa_id")
       .eq("id", id)
       .maybeSingle();
 
@@ -115,6 +126,11 @@ export class AuthGuard implements CanActivate {
       email: data.email,
       nome: data.nome,
       papel: data.papel as Papel,
+      // `?? null` e não `?? undefined`: a coluna é nova e um perfil gravado
+      // antes dela vem sem a chave. Sem o coalesce, `empresaId` chegaria
+      // `undefined` nos serviços e um filtro condicional o leria como "sem
+      // empresa" em vez de "acesso global".
+      empresaId: (data.empresa_id as string | null) ?? null,
     };
 
     this.cachePerfil.set(id, { valor: usuario, expiraEm: agora + AuthGuard.TTL_CACHE_MS });

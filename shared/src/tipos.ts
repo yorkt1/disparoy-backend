@@ -198,6 +198,16 @@ export type StatusCampanha =
   | "agendada"
   | "em_andamento"
   | "pausada"
+  /**
+   * Pausada pelo SISTEMA, não por uma pessoa.
+   *
+   * Distinta de `pausada` porque só ela pode ser retomada automaticamente
+   * quando o canal voltar. Retomar sozinho o que alguém pausou de propósito
+   * seria a pior surpresa possível num sistema que fala com gente de verdade.
+   *
+   * O motivo fica em `campanhas.pausada_motivo`, já em linguagem de operador.
+   */
+  | "pausada_por_canal"
   | "concluida"
   | "falhou";
 
@@ -236,6 +246,14 @@ export interface Campanha {
   concluidaEm: string | null;
   metricas: MetricasCampanha;
   templatePrincipal: string | null;
+  /**
+   * Por que o SISTEMA pausou, em linguagem de operador.
+   *
+   * Preenchido só quando `status === "pausada_por_canal"`. É o texto que a
+   * faixa da tela mostra — sem ele, a campanha pararia sozinha e a tela não
+   * teria como dizer o motivo, que era exatamente o problema original.
+   */
+  pausadaMotivo: string | null;
 }
 
 /** Campanha sem a sequência — payload leve para tabelas. */
@@ -297,7 +315,11 @@ export type AcaoLog =
   | "sessao.iniciada"
   | "usuario.criado"
   | "usuario.papel_alterado"
+  // Redefinida: um admin trocou a senha de OUTRA pessoa. Alterada: a própria
+  // pessoa trocou a dela, informando a anterior. Separados de propósito — para
+  // quem investiga a trilha depois, são eventos de segurança bem diferentes.
   | "usuario.senha_redefinida"
+  | "usuario.senha_alterada"
   | "usuario.desativado"
   | "usuario.reativado";
 

@@ -76,6 +76,15 @@ export class WhatsappService {
     destinatario: DestinatarioEnvio;
     sequencia: MensagemSequencia[];
     variacoes: Spintax[];
+    /**
+     * Passos (1-based) que já foram entregues numa tentativa anterior.
+     *
+     * O job de contato tem retry. Sem esta lista, uma sequência que falha no
+     * terceiro passo reenviaria os dois primeiros na nova tentativa — e receber
+     * a mesma mensagem duas vezes é o tipo de coisa que faz o contato denunciar
+     * o número, que é exatamente o que o sistema inteiro tenta evitar.
+     */
+    pularPassos?: ReadonlySet<number>;
     /** Chamado depois de cada passo, antes do próximo. */
     aoTerminarPasso?: (r: ResultadoPasso) => Promise<void>;
   }): Promise<ResultadoPasso[]> {
@@ -84,6 +93,10 @@ export class WhatsappService {
     const saida: ResultadoPasso[] = [];
 
     for (const [indice, mensagem] of entrada.sequencia.entries()) {
+      // O passo é 1-based porque é assim que ele é gravado em
+      // `mensagens_enviadas` e mostrado na tela da campanha.
+      if (entrada.pularPassos?.has(indice + 1)) continue;
+
       const corpoRenderizado = renderizarMensagem(mensagem.corpo, {
         variacoes,
         variaveis: entrada.destinatario.variaveis,

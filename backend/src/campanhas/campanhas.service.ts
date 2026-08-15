@@ -239,7 +239,7 @@ export class CampanhasService {
     });
 
     if (status !== "rascunho") {
-      await this.fila.agendarCampanha({ campanhaId }, dados.agendadaPara);
+      await this.fila.agendarCampanha({ campanhaId, rodada: 0 }, dados.agendadaPara);
       await this.auditoria.registrar({
         usuarioId: usuario.id,
         usuarioNome: usuario.nome,
@@ -266,7 +266,27 @@ export class CampanhasService {
       throw new ConflictException("Só é possível pausar campanha agendada ou em andamento.");
     }
 
-    await this.fila.cancelarCampanha(id);
+    /**
+     * Pausar não remove job da fila — invalida a rodada.
+     *
+     * O pg-boss só apaga job por id dele, e o código antigo passava o id da
+     * CAMPANHA para `deleteJob`: não apagava nada e ainda registrava "jobs
+     * cancelados" no log. Pior, os jobs de contato nunca eram tocados.
+     *
+     * Agora o contador de rodada sobe, todo job já enfileirado vira no-op ao
+     * acordar, e os pendentes voltam a ser candidatos ao replanejamento. Uma
+     * escrita, sem depender de a fila colaborar.
+     */
+    const { error } = await this.supabase.db.rpc("invalidar_rodada_campanha", {
+      p_campanha_id: id,
+    });
+    if (error) {
+      throw new ConflictException(
+        `Não foi possível pausar com segurança: ${error.message}. ` +
+          `A campanha continua em andamento — tente de novo.`,
+      );
+    }
+
     await this.supabase.tabela("campanhas").update({ status: "pausada" }).eq("id", id);
 
     await this.auditoria.registrar({
@@ -286,7 +306,16 @@ export class CampanhasService {
   /** Retoma de onde parou: os contatos já enviados continuam marcados. */
   async retomar(usuario: UsuarioAutenticado, id: string, ip: string): Promise<ResumoCampanha> {
     const campanha = await this.obter(id);
-    if (campanha.status !== "pausada" && campanha.status !== "rascunho") {
+    /**
+     * `pausada_por_canal` entra aqui junto com `pausada`.
+     *
+     * Sem isso, campanha pausada pelo sistema (canal caiu, gateway fora do ar)
+     * ficaria sem nenhum caminho de retomada pelo produto: o operador reconecta
+     * o QR e não teria botão nenhum para seguir. O `exigirCanaisProntos` abaixo
+     * é o que impede retomar antes de o canal voltar de verdade.
+     */
+    const retomaveis = ["pausada", "pausada_por_canal", "rascunho"];
+    if (!retomaveis.includes(campanha.status)) {
       throw new ConflictException("Só é possível retomar campanha pausada ou em rascunho.");
     }
     await this.exigirCanaisProntos(usuario, campanha.canaisIds);
@@ -296,10 +325,16 @@ export class CampanhasService {
       .update({
         status: "em_andamento",
         iniciada_em: campanha.iniciadaEm ?? new Date().toISOString(),
+        // Limpa a marca da pausa automática: se não zerar, o watchdog pode
+        // reconsiderar esta campanha como "pausada por aquele canal" depois.
+        pausada_por_canal_id: null,
+        pausada_motivo: null,
       })
       .eq("id", id);
 
-    await this.fila.agendarCampanha({ campanhaId: id }, null);
+    // A rodada atual é a que o pause deixou; o planejamento carimba os jobs
+    // novos com ela, e os antigos (rodada anterior) morrem ao acordar.
+    await this.fila.agendarCampanha({ campanhaId: id, rodada: await this.rodadaAtual(id) }, null);
 
     await this.auditoria.registrar({
       usuarioId: usuario.id,
@@ -326,6 +361,21 @@ export class CampanhasService {
       .eq("id", id)
       .maybeSingle();
     return (data as unknown as LinhaCampanha) ?? null;
+  }
+
+  /**
+   * Geração atual da execução, para carimbar os jobs novos.
+   *
+   * Lida na hora de enfileirar, e não guardada em memória: entre pausar e
+   * retomar pode ter passado um dia e outro processo pode ter mexido nela.
+   */
+  private async rodadaAtual(id: string): Promise<number> {
+    const { data } = await this.supabase
+      .tabela("campanhas")
+      .select("rodada")
+      .eq("id", id)
+      .maybeSingle();
+    return (data as { rodada: number | null } | null)?.rodada ?? 0;
   }
 
   /** Canal precisa existir, estar conectado e ser acessível ao usuário. */

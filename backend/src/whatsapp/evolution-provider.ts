@@ -2,6 +2,8 @@ import type { Canal, TipoMidia } from "@disparoy/dominio";
 import { ambiente } from "../config/ambiente";
 import {
   CAPACIDADES,
+  classificarEvolution,
+  type CodigoFalha,
   type EnvioSolicitado,
   type ProvedorComQrCode,
   type ResultadoEnvio,
@@ -76,7 +78,14 @@ export function evolutionConfigurada(): boolean {
 export class ErroEvolution extends Error {
   constructor(
     message: string,
-    readonly codigo: string,
+    /**
+     * Código do domínio, não o status HTTP.
+     *
+     * Antes isto guardava `String(resposta.status)`, e um `400` da Evolution
+     * podia ser número inválido, mediatype errado ou instância não pareada —
+     * três causas sem nada em comum recebendo o mesmo código.
+     */
+    readonly codigo: CodigoFalha,
   ) {
     super(message);
     this.name = "ErroEvolution";
@@ -114,19 +123,114 @@ interface RespostaEvolution {
 
 async function chamar<T>(caminho: string, init: RequestInit = {}): Promise<T> {
   const cfg = lerConfig();
-  if (!cfg) throw new ErroEvolution(SEM_CONFIG, "evolution_nao_configurada");
+  if (!cfg) throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
 
-  const resposta = await fetch(`${cfg.baseUrl}/${caminho}`, {
-    ...init,
-    headers: { apikey: cfg.apiKey, "Content-Type": "application/json", ...init.headers },
-    cache: "no-store",
-  });
+  let resposta: Response;
+  try {
+    resposta = await fetch(`${cfg.baseUrl}/${caminho}`, {
+      ...init,
+      headers: { apikey: cfg.apiKey, "Content-Type": "application/json", ...init.headers },
+      cache: "no-store",
+      // Sem teto de tempo, um envio pendurado segura o job até o
+      // `expireInSeconds` de 23 h da fila: a campanha para e nada indica por quê.
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (e) {
+    /**
+     * O fetch REJEITOU — não houve resposta nenhuma.
+     *
+     * Este ramo é o mais importante do arquivo: é ele que distingue "a VPS da
+     * Evolution caiu" (culpa nossa) de "o WhatsApp do cliente caiu". Antes a
+     * exceção não era `ErroEvolution`, escorregava para o catch genérico do
+     * `enviar` e virava a string "Falha ao falar com a Evolution API." sem
+     * código — o sinal mais valioso do sistema era o que menos carregava
+     * informação.
+     */
+    const detalhe = e instanceof Error ? e.message : String(e);
+    throw new ErroEvolution(detalhe, classificarEvolution(0, detalhe));
+  }
 
   const corpo = (await resposta.json().catch(() => ({}))) as RespostaEvolution;
   if (!resposta.ok) {
-    throw new ErroEvolution(motivoDaFalha(corpo, resposta.status), String(resposta.status));
+    const motivo = motivoDaFalha(corpo, resposta.status);
+    throw new ErroEvolution(motivo, classificarEvolution(resposta.status, motivo));
   }
   return corpo as T;
+}
+
+/**
+ * Registra o webhook da instância. Devolve o motivo quando NÃO conseguiu.
+ *
+ * Antes isto era um `if` silencioso seguido de `.catch(() => undefined)`: duas
+ * falhas engolidas em sequência. Se as variáveis faltassem, o bloco inteiro era
+ * pulado sem aviso; se a chamada falhasse, o catch apagava. Nos dois casos o
+ * canal conectava, enviava mensagens normalmente e nunca reportava status
+ * nenhum — nem entrega, nem desconexão. O comentário logo acima afirmava que
+ * isso não podia acontecer, e o código permitia que acontecesse.
+ */
+async function registrarWebhook(instancia: string): Promise<string | null> {
+  const env = ambiente();
+
+  if (!env.APP_URL_PUBLICA || !env.EVOLUTION_WEBHOOK_SECRET) {
+    return (
+      "APP_URL_PUBLICA ou EVOLUTION_WEBHOOK_SECRET não estão definidas: este canal " +
+      "vai enviar mensagens, mas nunca vai reportar entrega nem desconexão."
+    );
+  }
+
+  try {
+    await chamar(CAMINHOS.definirWebhook(instancia), {
+      method: "POST",
+      body: JSON.stringify({
+        webhook: {
+          enabled: true,
+          url: `${env.APP_URL_PUBLICA.replace(/\/+$/, "")}/api/webhooks/evolution`,
+          headers: { "x-webhook-secret": env.EVOLUTION_WEBHOOK_SECRET },
+          events: EVENTOS,
+        },
+      }),
+    });
+    return null;
+  } catch (e) {
+    const detalhe = e instanceof Error ? e.message : String(e);
+    return `Não foi possível registrar o webhook (${detalhe}). O canal não vai reportar status.`;
+  }
+}
+
+/** O que o gateway respondeu sobre a sessão. */
+export type EstadoGateway = "open" | "close" | "connecting" | "indisponivel";
+
+/**
+ * Estado REAL da sessão, perguntado ao gateway.
+ *
+ * É a única fonte confiável sobre um canal. O `canais.status` no banco é cache
+ * do webhook, e o webhook é justamente a primeira coisa que morre quando a VPS
+ * cai — então o banco pode dizer "conectado" por horas enquanto o número está
+ * offline, e todo erro resultante parece defeito do sistema.
+ *
+ * `indisponivel` NÃO é sinônimo de `close`. Um diz "não consegui perguntar"
+ * (problema nosso), o outro diz "perguntei, e a sessão caiu" (WhatsApp do
+ * cliente). Colapsar os dois é exatamente o erro que esta função existe para
+ * corrigir: seria acusar o cliente de um problema nosso.
+ */
+export async function estadoDaInstancia(instancia: string): Promise<EstadoGateway> {
+  if (!evolutionConfigurada()) return "indisponivel";
+
+  try {
+    const r = await chamar<{ instance?: { state?: string }; state?: string }>(
+      CAMINHOS.estado(instancia),
+    );
+    const s = String(r.instance?.state ?? r.state ?? "").toLowerCase();
+    if (s === "open") return "open";
+    if (s === "connecting") return "connecting";
+    if (s === "close") return "close";
+    return "indisponivel";
+  } catch (e) {
+    // 404 é resposta, não silêncio: a instância não existe no gateway. Isso é
+    // um fato sobre o canal, e vale como sessão caída.
+    if (e instanceof ErroEvolution && e.codigo === "canal_sem_sessao") return "close";
+    return "indisponivel";
+  }
 }
 
 export const provedorEvolution: ProvedorComQrCode = {
@@ -135,7 +239,7 @@ export const provedorEvolution: ProvedorComQrCode = {
 
   async enviar(envio: EnvioSolicitado): Promise<ResultadoEnvio> {
     if (!evolutionConfigurada()) {
-      return { ok: false, erro: SEM_CONFIG, codigo: "evolution_nao_configurada" };
+      return { ok: false, erro: SEM_CONFIG, codigo: "provedor_nao_configurado" };
     }
 
     const instancia = envio.canal.instanciaEvolution;
@@ -161,15 +265,20 @@ export const provedorEvolution: ProvedorComQrCode = {
           });
 
       // Sem id externo o webhook nunca acha esta mensagem para marcar entregue.
-      if (!r.key?.id) return { ok: false, erro: "A Evolution não retornou id da mensagem." };
+      if (!r.key?.id) {
+        return {
+          ok: false,
+          erro: "A Evolution não retornou id da mensagem.",
+          codigo: "resposta_sem_id",
+        };
+      }
       return { ok: true, idExterno: r.key.id };
     } catch (e) {
-      const erro = e instanceof ErroEvolution ? e : null;
-      return {
-        ok: false,
-        erro: erro?.message ?? "Falha ao falar com a Evolution API.",
-        codigo: erro?.codigo,
-      };
+      // `chamar` já classificou tudo que sabe classificar, inclusive falha de
+      // rede. Só chega em `desconhecido` o que nem exceção nossa é.
+      if (e instanceof ErroEvolution) return { ok: false, erro: e.message, codigo: e.codigo };
+      const detalhe = e instanceof Error ? e.message : String(e);
+      return { ok: false, erro: detalhe, codigo: "desconhecido" };
     }
   },
 
@@ -216,7 +325,7 @@ export const provedorEvolution: ProvedorComQrCode = {
    * em "enviada" para sempre.
    */
   async iniciarSessao(canal: Canal): Promise<SessaoQrCode> {
-    if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "evolution_nao_configurada");
+    if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
 
     const instancia = canal.instanciaEvolution;
     const env = ambiente();
@@ -232,19 +341,7 @@ export const provedorEvolution: ProvedorComQrCode = {
       // Evolution devolve erro e seguimos direto para o connect.
     }).catch(() => undefined);
 
-    if (env.APP_URL_PUBLICA && env.EVOLUTION_WEBHOOK_SECRET) {
-      await chamar(CAMINHOS.definirWebhook(instancia), {
-        method: "POST",
-        body: JSON.stringify({
-          webhook: {
-            enabled: true,
-            url: `${env.APP_URL_PUBLICA.replace(/\/+$/, "")}/api/webhooks/evolution`,
-            headers: { "x-webhook-secret": env.EVOLUTION_WEBHOOK_SECRET },
-            events: EVENTOS,
-          },
-        }),
-      }).catch(() => undefined);
-    }
+    const aviso = await registrarWebhook(instancia);
 
     const r = await chamar<{ base64?: string; code?: string; qrcode?: { base64?: string } }>(
       CAMINHOS.conectar(instancia),
@@ -252,13 +349,18 @@ export const provedorEvolution: ProvedorComQrCode = {
     const qr = r.base64 ?? r.qrcode?.base64 ?? r.code;
     // Sem QR não há o que escanear; devolver vazio renderizaria uma imagem
     // quebrada e o operador ficaria esperando por nada.
-    if (!qr) throw new ErroEvolution("A Evolution não retornou o QR Code.", "sem_qr");
+    if (!qr) throw new ErroEvolution("A Evolution não retornou o QR Code.", "canal_sem_sessao");
 
-    return { canalId: canal.id, qr, expiraEm: new Date(Date.now() + 60_000).toISOString() };
+    return {
+      canalId: canal.id,
+      qr,
+      expiraEm: new Date(Date.now() + 60_000).toISOString(),
+      ...(aviso ? { aviso } : {}),
+    };
   },
 
   async encerrarSessao(canal: Canal): Promise<void> {
-    if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "evolution_nao_configurada");
+    if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
     await chamar(CAMINHOS.desconectar(canal.instanciaEvolution), { method: "DELETE" });
   },
 };

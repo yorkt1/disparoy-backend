@@ -15,3 +15,6 @@ export * from "./spintax.js";
 export * from "./contatos.js";
 export * from "./schemas.js";
 export * from "./whatsapp/tipos.js";
+export * from "./whatsapp/falhas.js";
+export * from "./avisos.js";
+export * from "./diagnostico.js";

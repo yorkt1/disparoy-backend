@@ -1,0 +1,14 @@
+{
+  /**
+   * Configuração do BUILD. O `nest build` prefere este arquivo quando ele
+   * existe; o `tsconfig.json` continua sendo o do editor e do typecheck.
+   *
+   * A única diferença é o que fica de fora da saída: teste não vai para
+   * `dist`. O `vitest` é devDependency e o Render instala só as dependências
+   * de produção no runtime — um `dist/**\/*.test.js` importando `vitest` é um
+   * require quebrado esperando alguém carregá-lo. Além disso é peso morto na
+   * imagem, já que o `vitest run` lê os `.ts` direto, sem precisar de build.
+   */
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "dist-worker", "src/**/*.test.ts"]
+}

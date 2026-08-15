@@ -1,5 +1,7 @@
 {
-  "extends": "./tsconfig.json",
+  // Estende o de BUILD, não o do editor: o worker também não precisa dos
+  // arquivos de teste dentro da saída.
+  "extends": "./tsconfig.build.json",
   "compilerOptions": {
     /**
      * Saída própria do worker.
