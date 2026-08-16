@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import type { Canal } from "@disparoy/dominio";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mapearAgenda } from "./evolution-provider.js";
 
 /**
@@ -61,5 +62,117 @@ describe("mapearAgenda", () => {
       { remoteJid: "5511900000003@s.whatsapp.net", pushName: "Bruno" },
     ]);
     expect(r.map((c) => c.nome)).toEqual(["Ácaro", "Bruno", "Zeca"]);
+  });
+});
+
+/**
+ * O cache é indexado pela INSTÂNCIA, e a instância sobrevive à troca de número.
+ * Estes testes existem porque o vazamento é invisível: nada falha, a planilha
+ * simplesmente sai com a agenda de outra pessoa.
+ */
+describe("cache da agenda", () => {
+  const canal = { id: "canal-1", instanciaEvolution: "inst" } as Canal;
+  const agendaCrua = [{ remoteJid: "5548991237324@s.whatsapp.net", pushName: "Gui" }];
+
+  /** Quantas vezes o gateway foi consultado de verdade. */
+  let buscas = 0;
+
+  const responder = (corpo: unknown) =>
+    new Response(JSON.stringify(corpo), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  /**
+   * Import dinâmico a cada teste: o cache é módulo-privado, então cache limpo é
+   * módulo novo.
+   */
+  async function carregarProvedor() {
+    Object.assign(process.env, {
+      NODE_ENV: "development",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "super-secret-service-role-key-123456",
+      JWT_SECRET: "1234567890abcdef1234567890abcdef",
+      DATABASE_URL: "postgres://user:pass@localhost:5432/app",
+      EVOLUTION_API_URL: "https://evolution.example.com",
+      EVOLUTION_API_KEY: "chave-de-teste",
+      EVOLUTION_WEBHOOK_SECRET: "1234567890abcdef",
+      // Vazia de propósito: sem ela `registrarWebhook` devolve aviso e não
+      // encosta na rede, o que deixa o teste focado no cache.
+      APP_URL_PUBLICA: "",
+    });
+    vi.resetModules();
+    return import("./evolution-provider.js");
+  }
+
+  beforeEach(() => {
+    buscas = 0;
+    vi.stubGlobal("fetch", async (url: string | URL) => {
+      const caminho = String(url);
+      if (caminho.includes("chat/findContacts")) {
+        buscas++;
+        return responder(agendaCrua);
+      }
+      // O connect precisa devolver QR, senão o pareamento lança antes da hora.
+      if (caminho.includes("instance/connect")) return responder({ base64: "qr-falso" });
+      return responder({});
+    });
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it("não repete a busca dentro da janela", async () => {
+    const { contatosDaInstancia } = await carregarProvedor();
+
+    await contatosDaInstancia("inst");
+    await contatosDaInstancia("inst");
+
+    expect(buscas).toBe(1);
+  });
+
+  it("esquece a agenda ao reparear — o número pode ser outro", async () => {
+    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
+
+    await contatosDaInstancia("inst");
+    await provedorEvolution.iniciarSessao(canal, { renovar: true });
+    await contatosDaInstancia("inst");
+
+    expect(buscas).toBe(2);
+  });
+
+  it("esquece a agenda mesmo num pareamento que não veio de um desconectar", async () => {
+    // A sessão também cai sozinha, pelo webhook ou pelo worker: nesses casos
+    // ninguém chama `encerrarSessao`, e só o pareamento seguinte limpa.
+    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
+
+    await contatosDaInstancia("inst");
+    await provedorEvolution.iniciarSessao(canal, {});
+    await contatosDaInstancia("inst");
+
+    expect(buscas).toBe(2);
+  });
+
+  it("esquece a agenda ao desconectar", async () => {
+    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
+
+    await contatosDaInstancia("inst");
+    await provedorEvolution.encerrarSessao(canal);
+    await contatosDaInstancia("inst");
+
+    expect(buscas).toBe(2);
+  });
+
+  it("não derruba o cache de outra instância", async () => {
+    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
+
+    await contatosDaInstancia("inst");
+    await contatosDaInstancia("outra");
+    await provedorEvolution.encerrarSessao(canal);
+    await contatosDaInstancia("outra");
+
+    expect(buscas).toBe(2);
   });
 });

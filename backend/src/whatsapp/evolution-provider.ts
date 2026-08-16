@@ -355,6 +355,21 @@ export const provedorEvolution: ProvedorComQrCode = {
     }
 
     const instancia = canal.instanciaEvolution;
+
+    /*
+     * Nenhuma agenda em cache sobrevive a um pareamento.
+     *
+     * O cache é indexado pela INSTÂNCIA, e a instância é a mesma quando se
+     * repareia com outro número — `excluir` já cuidava do canal apagado, mas
+     * reconectar é a mesma herança pela porta ao lado: dentro dos cinco minutos
+     * de cache, a extração devolveria a agenda do número anterior.
+     *
+     * Aqui e não no desconectar porque a sessão também cai sozinha, pelo
+     * webhook ou pelo worker, sem ninguém chamar `encerrarSessao`. Todo
+     * religamento passa por este ponto; nem toda queda passa por aquele.
+     */
+    esquecerAgenda(instancia);
+
     // A Evolution quer o número só com dígitos: o `+` do E.164 volta como
     // "number is not valid" e derruba o pareamento inteiro.
     const numero = opcoes.numero?.replace(/\D/g, "");
@@ -463,6 +478,10 @@ export const provedorEvolution: ProvedorComQrCode = {
 
   async encerrarSessao(canal: Canal): Promise<void> {
     if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
+    // Antes da chamada: quem desconecta já decidiu que aquele número saiu, e
+    // `ajustar` engole a falha do gateway e marca o canal como desconectado do
+    // mesmo jeito. Limpar depois deixaria o cache de pé justo nesse caso.
+    esquecerAgenda(canal.instanciaEvolution);
     await chamar(CAMINHOS.desconectar(canal.instanciaEvolution), { method: "DELETE" });
   },
 };
