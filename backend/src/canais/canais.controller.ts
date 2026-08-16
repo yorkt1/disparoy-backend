@@ -111,6 +111,17 @@ export class CanaisController {
       .send(Buffer.from(arquivo));
   }
 
+  /**
+   * Quantos contatos a agenda tem agora — sem baixar o arquivo.
+   *
+   * A tela chama em laço logo depois do pareamento, enquanto o WhatsApp ainda
+   * sincroniza a agenda com o gateway.
+   */
+  @Get(":id/contatos/contagem")
+  contarContatos(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {
+    return this.canais.contarContatos(usuario, id);
+  }
+
   /** Campanhas que dependem do canal — consultado antes de confirmar a exclusão. */
   @Get(":id/vinculos")
   async vinculos(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {

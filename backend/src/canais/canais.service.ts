@@ -453,6 +453,27 @@ export class CanaisService {
    * apenas a associação "esta campanha pode usar este canal", que não faz
    * sentido depois que o canal deixou de existir.
    */
+  /**
+   * Quantos contatos a agenda tem AGORA.
+   *
+   * Existe por causa de um comportamento do WhatsApp: logo depois do
+   * pareamento, a agenda ainda está sendo sincronizada do celular para o
+   * gateway, e `findContacts` responde uma lista VAZIA — sem erro nenhum.
+   * Quem clicava em "Contatos" nesse instante recebia "nenhum contato na
+   * agenda deste número", que é falso: a agenda existe, só não chegou.
+   *
+   * A tela consulta esta rota até vir um número maior que zero, e só então
+   * baixa a planilha. Devolver só a contagem evita transferir 200 KB a cada
+   * tentativa.
+   */
+  async contarContatos(usuario: UsuarioAutenticado, id: string): Promise<{ total: number }> {
+    const canal = await this.obter(usuario, id);
+    if (canal.tipoConexao !== "qrcode" || canal.status !== "conectado") {
+      return { total: 0 };
+    }
+    return { total: (await contatosDaInstancia(canal.instanciaEvolution)).length };
+  }
+
   async excluir(
     usuario: UsuarioAutenticado,
     id: string,
