@@ -53,7 +53,10 @@ export class WhatsappService {
     return provedorMetaCloud.listarTemplates();
   }
 
-  iniciarSessaoQr(canal: Canal, opcoes?: { metodo?: MetodoPareamento; numero?: string }) {
+  iniciarSessaoQr(
+    canal: Canal,
+    opcoes?: { metodo?: MetodoPareamento; numero?: string; renovar?: boolean },
+  ) {
     return provedorEvolution.iniciarSessao(canal, opcoes);
   }
 

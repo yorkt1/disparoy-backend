@@ -318,7 +318,15 @@ export class CanaisService {
     if (canal.tipoConexao !== "qrcode") {
       throw new BadRequestException("Canais de API Oficial não pareiam por QR Code.");
     }
-    const sessao = await this.whatsapp.iniciarSessaoQr(canal, opcoes);
+    /*
+     * `renovar: true` sempre que se reconecta.
+     *
+     * É a semântica da ação: quem chega aqui quer um pareamento NOVO, ou
+     * porque o anterior expirou, ou porque a sessão caiu. Sem reiniciar, o
+     * gateway devolveria o mesmo código de antes — que é justamente o que não
+     * funciona mais.
+     */
+    const sessao = await this.whatsapp.iniciarSessaoQr(canal, { ...opcoes, renovar: true });
     return {
       metodo: sessao.metodo,
       qr: sessao.qr,

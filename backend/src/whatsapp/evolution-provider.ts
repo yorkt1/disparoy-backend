@@ -33,6 +33,7 @@ const CAMINHOS = {
       ? `instance/connect/${i}?number=${encodeURIComponent(numero)}`
       : `instance/connect/${i}`,
   estado: (i: string) => `instance/connectionState/${i}`,
+  reiniciar: (i: string) => `instance/restart/${i}`,
   desconectar: (i: string) => `instance/logout/${i}`,
   excluir: (i: string) => `instance/delete/${i}`,
   definirWebhook: (i: string) => `webhook/set/${i}`,
@@ -341,7 +342,7 @@ export const provedorEvolution: ProvedorComQrCode = {
    */
   async iniciarSessao(
     canal: Canal,
-    opcoes: { metodo?: MetodoPareamento; numero?: string } = {},
+    opcoes: { metodo?: MetodoPareamento; numero?: string; renovar?: boolean } = {},
   ): Promise<SessaoPareamento> {
     if (!evolutionConfigurada()) throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
 
@@ -372,14 +373,56 @@ export const provedorEvolution: ProvedorComQrCode = {
       // Evolution devolve erro e seguimos direto para o connect.
     }).catch(() => undefined);
 
+    /*
+     * Reiniciar a instância é o que produz um pareamento NOVO.
+     *
+     * `instance/connect` devolve o MESMO `pairingCode` enquanto o socket
+     * daquela sessão continua de pé. Depois que o código expirava, "gerar
+     * outro" trazia de volta exatamente o código morto — a tela mostrava algo
+     * que não funcionava mais e não havia saída pelo produto.
+     *
+     * Medido: dois `connect` seguidos devolveram `245574YY` nas duas vezes;
+     * com o restart no meio, o código mudou.
+     *
+     * Só na renovação: na criação a instância acabou de nascer, e reiniciá-la
+     * seria derrubar a sessão antes de ela existir.
+     */
+    let codigoAntigo: string | null = null;
+    if (opcoes.renovar) {
+      // A resposta do restart ainda traz o código VELHO — e é justamente por
+      // isso que ela serve: vira a referência para saber quando o novo chegou.
+      const reinicio = await chamar<{ pairingCode?: string }>(CAMINHOS.reiniciar(instancia), {
+        method: "POST",
+      }).catch(() => null);
+      codigoAntigo = reinicio?.pairingCode ?? null;
+    }
+
     const aviso = await registrarWebhook(instancia);
 
-    const r = await chamar<{
-      base64?: string;
-      code?: string;
-      pairingCode?: string;
-      qrcode?: { base64?: string; pairingCode?: string };
-    }>(CAMINHOS.conectar(instancia, numero));
+    const conectar = () =>
+      chamar<{
+        base64?: string;
+        code?: string;
+        pairingCode?: string;
+        qrcode?: { base64?: string; pairingCode?: string };
+      }>(CAMINHOS.conectar(instancia, numero));
+
+    let r = await conectar();
+
+    /*
+     * Espera o socket novo subir, medindo em vez de cronometrar.
+     *
+     * Medido neste gateway: 1,5 s depois do restart o `connect` ainda devolvia
+     * o código velho; a partir de ~3 s vinha um novo. Um `sleep` fixo escolhe
+     * um número que vai errar no dia em que a VPS estiver mais lenta — então a
+     * espera termina quando o CÓDIGO MUDA, que é a condição real.
+     */
+    for (let tentativa = 0; tentativa < 6; tentativa++) {
+      const atual = r.pairingCode ?? r.qrcode?.pairingCode ?? null;
+      if (!codigoAntigo || (atual && atual !== codigoAntigo)) break;
+      await new Promise((espera) => setTimeout(espera, 1200));
+      r = await conectar();
+    }
 
     if (metodo === "codigo") {
       const codigo = r.pairingCode ?? r.qrcode?.pairingCode ?? null;

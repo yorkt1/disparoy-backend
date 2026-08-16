@@ -198,7 +198,18 @@ export interface ProvedorComQrCode extends ProvedorWhatsApp {
    */
   iniciarSessao(
     canal: Canal,
-    opcoes?: { metodo?: MetodoPareamento; numero?: string },
+    opcoes?: {
+      metodo?: MetodoPareamento;
+      numero?: string;
+      /**
+       * Reinicia a sessão antes de pedir o pareamento.
+       *
+       * Necessário para obter um código NOVO: o gateway devolve o mesmo
+       * `pairingCode` enquanto o socket anterior está de pé, então sem isto
+       * "gerar outro" trazia de volta o código que acabou de expirar.
+       */
+      renovar?: boolean;
+    },
   ): Promise<SessaoPareamento>;
   encerrarSessao(canal: Canal): Promise<void>;
 }
