@@ -49,6 +49,15 @@ services:
     startCommand: npm run start:api
     # Rota @Publico(), leve e sem sessão — verifica o banco de passagem.
     healthCheckPath: /api/saude
+    # UMA réplica, de propósito.
+    #
+    # O cache de agenda em `evolution-provider.ts` vive na memória do processo,
+    # e é a única coisa do backend que vive. Com duas réplicas, repare um canal
+    # com outro número numa delas e a outra segue entregando a agenda do número
+    # anterior por até cinco minutos — dado pessoal de quem não tem mais nada a
+    # ver com aquele canal. Antes de subir este número, leia o comentário de
+    # `CACHE_AGENDA_MS`: a saída é remover o cache, não movê-lo para o banco.
+    numInstances: 1
     envVars:
       - fromGroup: disparoy-segredos
       - key: NODE_ENV

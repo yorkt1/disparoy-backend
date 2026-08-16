@@ -71,6 +71,17 @@ const SEM_CONFIG =
   "Evolution API não configurada: preencha EVOLUTION_API_URL e EVOLUTION_API_KEY " +
   "em backend/.env.";
 
+/**
+ * Quanto tempo o pareamento espera o gateway trocar o código, no máximo.
+ *
+ * Esta espera roda dentro da requisição HTTP, então ela é orçamento de latência
+ * da rota, não paciência: o operador está olhando para um botão girando e há um
+ * proxy contando os segundos no meio do caminho. Seis segundos dão o dobro dos
+ * ~3 s medidos para o código novo aparecer, e mantêm a resposta inteira abaixo
+ * dos 10 s que derrubariam a conexão.
+ */
+const ESPERA_CODIGO_NOVO_MS = 6_000;
+
 interface ConfigEvolution {
   baseUrl: string;
   apiKey: string;
@@ -402,17 +413,37 @@ export const provedorEvolution: ProvedorComQrCode = {
      * Só na renovação: na criação a instância acabou de nascer, e reiniciá-la
      * seria derrubar a sessão antes de ela existir.
      */
+    const avisos: string[] = [];
     let codigoAntigo: string | null = null;
+
     if (opcoes.renovar) {
-      // A resposta do restart ainda traz o código VELHO — e é justamente por
-      // isso que ela serve: vira a referência para saber quando o novo chegou.
-      const reinicio = await chamar<{ pairingCode?: string }>(CAMINHOS.reiniciar(instancia), {
-        method: "POST",
-      }).catch(() => null);
-      codigoAntigo = reinicio?.pairingCode ?? null;
+      try {
+        // A resposta do restart ainda traz o código VELHO — e é justamente por
+        // isso que ela serve: vira a referência para saber quando o novo chegou.
+        const reinicio = await chamar<{ pairingCode?: string }>(CAMINHOS.reiniciar(instancia), {
+          method: "POST",
+        });
+        codigoAntigo = reinicio?.pairingCode ?? null;
+      } catch (e) {
+        /*
+         * Reinício falhou: sem ele, o `connect` devolve o código ANTERIOR.
+         *
+         * O `.catch(() => null)` que estava aqui produzia o pior desfecho
+         * possível — `codigoAntigo` ficava nulo, a espera lá embaixo desistia
+         * na primeira volta por não ter com o que comparar, e a rota entregava
+         * o código morto com cara de novo. O operador digitava algo que não
+         * tinha como funcionar e a tela não dava nenhuma pista do motivo.
+         */
+        avisos.push(
+          `Não foi possível reiniciar a sessão no gateway (${
+            e instanceof Error ? e.message : String(e)
+          }). O código abaixo pode ser o da tentativa anterior.`,
+        );
+      }
     }
 
-    const aviso = await registrarWebhook(instancia);
+    const avisoWebhook = await registrarWebhook(instancia);
+    if (avisoWebhook) avisos.push(avisoWebhook);
 
     const conectar = () =>
       chamar<{
@@ -431,13 +462,35 @@ export const provedorEvolution: ProvedorComQrCode = {
      * o código velho; a partir de ~3 s vinha um novo. Um `sleep` fixo escolhe
      * um número que vai errar no dia em que a VPS estiver mais lenta — então a
      * espera termina quando o CÓDIGO MUDA, que é a condição real.
+     *
+     * O teto é de TEMPO, e não de tentativas, porque tudo isto acontece DENTRO
+     * da requisição HTTP do operador. Seis tentativas de 1,2 s mais seis
+     * `connect` chegavam a 12-15 s de resposta síncrona — acima do timeout
+     * padrão de proxy (10 s), o que troca "código velho" por "502 sem
+     * explicação". Com 6 s, o pior caso da rota inteira fica em torno de 8 s e
+     * ainda sobra o dobro da latência medida.
      */
-    for (let tentativa = 0; tentativa < 6; tentativa++) {
+    const limite = Date.now() + ESPERA_CODIGO_NOVO_MS;
+    while (codigoAntigo && Date.now() < limite) {
       const atual = r.pairingCode ?? r.qrcode?.pairingCode ?? null;
-      if (!codigoAntigo || (atual && atual !== codigoAntigo)) break;
+      if (atual && atual !== codigoAntigo) break;
       await new Promise((espera) => setTimeout(espera, 1200));
       r = await conectar();
     }
+
+    /*
+     * Desistir calado devolveria o código morto como se fosse novo — o mesmo
+     * desfecho do restart engolido, por outro caminho. Se o gateway ainda não
+     * trocou, quem vai digitar precisa saber disso ANTES de tentar.
+     */
+    if (codigoAntigo && (r.pairingCode ?? r.qrcode?.pairingCode ?? null) === codigoAntigo) {
+      avisos.push(
+        "O gateway ainda está devolvendo o código da tentativa anterior. " +
+          "Se ele não funcionar, peça outro em alguns segundos.",
+      );
+    }
+
+    const aviso = avisos.length > 0 ? avisos.join(" ") : null;
 
     if (metodo === "codigo") {
       const codigo = r.pairingCode ?? r.qrcode?.pairingCode ?? null;
@@ -514,6 +567,19 @@ export interface ContatoDaAgenda {
  * Cinco minutos porque agenda de WhatsApp muda devagar, e a extração é um ato
  * pontual: quem acabou de parear vai baixar nos próximos minutos, e quem
  * recarrega a página no meio disso não deveria pagar a busca de novo.
+ *
+ * SUPÕE UM PROCESSO SÓ DE API, e é a única coisa neste backend que supõe isso.
+ * `esquecerAgenda` alcança apenas a memória de quem a chamou: com duas réplicas
+ * de web, repare o canal com outro número na réplica A e a réplica B segue
+ * entregando a agenda do número anterior até estes cinco minutos passarem.
+ * `render.yaml` fixa `numInstances: 1` por causa disto.
+ *
+ * E o destino natural do estado aqui — o Postgres — é justamente o que este
+ * dado não pode ter: a agenda são milhares de telefones de terceiros, e não
+ * gravá-los é decisão de produto, não descuido (veja `extrairContatos`).
+ * Persistir o cache criaria o cadastro paralelo de contatos que o sistema
+ * inteiro recusa ter. Para escalar a API, o caminho é derrubar o cache — não
+ * movê-lo para o banco.
  */
 const CACHE_AGENDA_MS = 5 * 60_000;
 const cacheAgenda = new Map<string, { contatos: ContatoDaAgenda[]; expiraEm: number }>();
@@ -539,6 +605,23 @@ export async function contatosDaInstancia(
   });
 
   const contatos = mapearAgenda(bruto);
+
+  /*
+   * Varre os vencidos antes de guardar o novo.
+   *
+   * O Map só perdia entrada por sobrescrita ou `esquecerAgenda`, então uma
+   * agenda vencida seguia na memória até alguém ler AQUELA instância de novo —
+   * o que pode nunca acontecer, no canal que o operador parou de usar. O que
+   * incomoda não são os bytes: são milhares de telefones de terceiros parados
+   * num processo que, em todo o resto, não persiste contato em lugar nenhum.
+   *
+   * Aqui e não num timer: `setInterval` seguraria o processo vivo e rodaria
+   * também nos servidores ociosos. A varredura custa uma passada por canal, e
+   * só quando a busca de verdade já foi paga.
+   */
+  for (const [chave, guardada] of cacheAgenda) {
+    if (guardada.expiraEm <= agora) cacheAgenda.delete(chave);
+  }
 
   /*
    * Agenda vazia NÃO entra no cache.
@@ -574,22 +657,98 @@ export async function fotoDaInstancia(
     const instancias = await chamar<{ name?: string; profilePicUrl?: string }[]>(
       CAMINHOS.buscarInstancia(instancia),
     );
-    const url = (Array.isArray(instancias) ? instancias : []).find(
+    const bruta = (Array.isArray(instancias) ? instancias : []).find(
       (i) => i.name === instancia,
     )?.profilePicUrl;
+    if (!bruta) return null;
+
+    const url = urlDeFotoPermitida(bruta);
     if (!url) return null;
 
     // Sem apikey: a URL do WhatsApp é pública enquanto vale.
-    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    //
+    // `redirect: "error"` porque seguir redirecionamento anularia a checagem de
+    // host: bastaria o destino permitido responder 302 para onde quisesse.
+    const r = await fetch(url, { signal: AbortSignal.timeout(10_000), redirect: "error" });
     if (!r.ok) return null;
 
     const tipo = r.headers.get("content-type") ?? "image/jpeg";
     if (!tipo.startsWith("image/")) return null;
 
-    return { bytes: new Uint8Array(await r.arrayBuffer()), tipo };
+    const bytes = await lerAteOLimite(r, FOTO_MAX_BYTES);
+    return bytes ? { bytes, tipo } : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Teto da foto de perfil. Foto de WhatsApp real não passa de algumas dezenas de
+ * KB; 2 MB é folga larga para um dado que existe só para enfeitar a listagem.
+ */
+const FOTO_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Só o domínio de mídia do WhatsApp entra.
+ *
+ * Esta URL vem do GATEWAY, que é software de terceiro rodando numa VPS que não
+ * é nossa — e o que a API fizer com ela sai da rede do Render, de dentro. Sem a
+ * checagem, quem controlar a resposta da Evolution escolhe o endereço que a
+ * nossa API vai buscar: `http://169.254.169.254/`, um serviço interno que não
+ * está publicado na internet, qualquer coisa alcançável daqui. O resultado do
+ * GET ainda por cima vai parar no Storage, de onde dá para ler depois.
+ *
+ * Casar sufixo `.whatsapp.net` com o ponto na frente é o que impede
+ * `whatsapp.net.invasor.com` de passar.
+ */
+function urlDeFotoPermitida(bruta: string): URL | null {
+  let url: URL;
+  try {
+    url = new URL(bruta);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:") return null;
+
+  const host = url.hostname.toLowerCase();
+  if (host !== "whatsapp.net" && !host.endsWith(".whatsapp.net")) return null;
+
+  return url;
+}
+
+/**
+ * Lê o corpo cortando no limite, em vez de depois dele.
+ *
+ * `arrayBuffer()` só permitiria conferir o tamanho com tudo já na memória — e
+ * "tudo" é o que a outra ponta decidir mandar. `content-length` não substitui a
+ * contagem: é informado por quem responde, e pode faltar ou mentir.
+ */
+async function lerAteOLimite(r: Response, limite: number): Promise<Uint8Array | null> {
+  const leitor = r.body?.getReader();
+  if (!leitor) return null;
+
+  const pedacos: Uint8Array[] = [];
+  let total = 0;
+
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limite) {
+      await leitor.cancel();
+      return null;
+    }
+    pedacos.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let posicao = 0;
+  for (const pedaco of pedacos) {
+    bytes.set(pedaco, posicao);
+    posicao += pedaco.byteLength;
+  }
+  return bytes;
 }
 
 /** Descarta a agenda guardada — o canal saiu, o cache não pode sobreviver a ele. */
