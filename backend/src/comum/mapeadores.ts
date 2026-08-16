@@ -71,7 +71,7 @@ export const COLUNAS_CANAL =
   // Gravadas pela vigilância desde a migration de atribuição de falha, mas até
   // aqui nunca lidas: o painel mostrava `status` — cache do webhook — como se
   // fosse fato confirmado.
-  "estado_gateway, estado_verificado_em";
+  "estado_gateway, estado_verificado_em, foto_url";
 
 export interface LinhaCanal {
   id: string;
@@ -88,6 +88,7 @@ export interface LinhaCanal {
   meta_phone_number_id: string | null;
   estado_gateway: EstadoGateway | null;
   estado_verificado_em: string | null;
+  foto_url: string | null;
 }
 
 export function paraCanal(l: LinhaCanal): Canal {
@@ -105,6 +106,7 @@ export function paraCanal(l: LinhaCanal): Canal {
     conectadoEm: iso(l.conectado_em),
     estadoGateway: l.estado_gateway ?? null,
     estadoVerificadoEm: iso(l.estado_verificado_em),
+    fotoUrl: l.foto_url ?? null,
     metaPhoneNumberId: l.meta_phone_number_id ?? undefined,
   };
 }

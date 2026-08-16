@@ -7,7 +7,12 @@ import type {
   Spintax,
 } from "@disparoy/dominio";
 import { categoriaDe, explicar, paraCampanha, statusDoGateway } from "@disparoy/dominio";
-import { estadoDaInstancia, numeroDaInstancia } from "../whatsapp/evolution-provider";
+import {
+  estadoDaInstancia,
+  fotoDaInstancia,
+  numeroDaInstancia,
+} from "../whatsapp/evolution-provider";
+import { BUCKET_MIDIA } from "../midia/midia.service";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { WhatsappService } from "../whatsapp/whatsapp.service";
@@ -463,6 +468,30 @@ export class DisparoService {
   }
 
   /**
+   * Guarda a foto do número no nosso Storage.
+   *
+   * Nunca lança: foto é enfeite, e uma falha aqui não pode interromper a
+   * vigilância, que é o que devolve campanha travada à fila.
+   */
+  private async baixarFoto(canalId: string, instancia: string): Promise<string | null> {
+    try {
+      const foto = await fotoDaInstancia(instancia);
+      if (!foto) return null;
+
+      const caminho = `canais/${canalId}.jpg`;
+      const { error } = await this.supabase.db.storage
+        .from(BUCKET_MIDIA)
+        .upload(caminho, foto.bytes, { contentType: foto.tipo, upsert: true });
+      if (error) return null;
+
+      const base = ambiente().SUPABASE_URL.replace(/\/+$/, "");
+      return `${base}/storage/v1/object/public/${BUCKET_MIDIA}/${caminho}?v=${Date.now()}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Carimba o sinal de vida do worker.
    *
    * Falha aqui não interrompe a manutenção: perder um pulso é perder um aviso,
@@ -516,7 +545,7 @@ export class DisparoService {
      */
     const { data, error } = await this.supabase
       .tabela("canais")
-      .select("id, nome, status, numero, instancia_evolution")
+      .select("id, nome, status, numero, instancia_evolution, foto_url")
       .eq("tipo_conexao", "qrcode")
       .in("status", ["conectado", "desconectado", "aguardando_qr"]);
 
@@ -531,6 +560,7 @@ export class DisparoService {
       status: string;
       numero: string | null;
       instancia_evolution: string;
+      foto_url: string | null;
     }[];
 
     for (const canal of canais) {
@@ -564,6 +594,21 @@ export class DisparoService {
           // Quem pareou de fato já estava conectado antes desta verificação;
           // sem isto a coluna ficaria eternamente vazia na tela.
           atualizacao.conectado_em = new Date().toISOString();
+        }
+      }
+
+      /*
+       * A foto entra pelo mesmo gancho do número, e pelo mesmo motivo: o
+       * webhook nunca chegou neste sistema, então a vigilância é o único lugar
+       * que percebe um canal recém-pareado.
+       *
+       * Só quando falta — não a cada minuto.
+       */
+      if (real === "conectado" && !canal.foto_url) {
+        const foto = await this.baixarFoto(canal.id, canal.instancia_evolution);
+        if (foto) {
+          atualizacao.foto_url = foto;
+          atualizacao.foto_em = new Date().toISOString();
         }
       }
 

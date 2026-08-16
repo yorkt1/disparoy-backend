@@ -492,6 +492,44 @@ export async function contatosDaInstancia(
   return contatos;
 }
 
+/**
+ * A foto de perfil do número pareado, já baixada.
+ *
+ * Devolve os BYTES, não a URL. A que a Evolution informa aponta para
+ * `pps.whatsapp.net` e é temporária — guardá-la significaria a foto sumir
+ * sozinha da tela um dia, sem nada ter acontecido.
+ *
+ * `null` em qualquer tropeço: número sem foto, URL já expirada, gateway mudo.
+ * Foto é enfeite; falhar aqui não pode atrapalhar o pareamento, que é o que
+ * realmente importa naquele momento.
+ */
+export async function fotoDaInstancia(
+  instancia: string,
+): Promise<{ bytes: Uint8Array; tipo: string } | null> {
+  if (!evolutionConfigurada()) return null;
+
+  try {
+    const instancias = await chamar<{ name?: string; profilePicUrl?: string }[]>(
+      CAMINHOS.buscarInstancia(instancia),
+    );
+    const url = (Array.isArray(instancias) ? instancias : []).find(
+      (i) => i.name === instancia,
+    )?.profilePicUrl;
+    if (!url) return null;
+
+    // Sem apikey: a URL do WhatsApp é pública enquanto vale.
+    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return null;
+
+    const tipo = r.headers.get("content-type") ?? "image/jpeg";
+    if (!tipo.startsWith("image/")) return null;
+
+    return { bytes: new Uint8Array(await r.arrayBuffer()), tipo };
+  } catch {
+    return null;
+  }
+}
+
 /** Descarta a agenda guardada — o canal saiu, o cache não pode sobreviver a ele. */
 export function esquecerAgenda(instancia: string): void {
   cacheAgenda.delete(instancia);

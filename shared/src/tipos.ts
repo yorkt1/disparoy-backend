@@ -100,6 +100,14 @@ export interface Canal {
    */
   estadoGateway: EstadoGateway | null;
   estadoVerificadoEm: string | null;
+  /**
+   * Foto de perfil do número, guardada no nosso Storage.
+   *
+   * Não é o link do WhatsApp: aquele expira sozinho, e a tela passaria a
+   * mostrar imagem quebrada sem nada ter acontecido. `null` é legítimo —
+   * número sem foto, ou foto ainda não baixada.
+   */
+  fotoUrl: string | null;
   metaPhoneNumberId?: string;
 }
 

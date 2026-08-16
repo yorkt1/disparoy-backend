@@ -19,6 +19,7 @@ function canal(p: Partial<Canal> = {}): Canal {
     conectadoEm: "2026-08-09T22:41:29.000Z",
     estadoGateway: "open",
     estadoVerificadoEm: "2026-08-15T11:59:00.000Z",
+    fotoUrl: null,
     ...p,
   };
 }

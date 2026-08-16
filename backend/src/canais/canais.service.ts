@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { z } from "zod";
@@ -22,9 +23,12 @@ import {
   esquecerAgenda,
   estadoDaInstancia,
   excluirInstancia,
+  fotoDaInstancia,
   numeroDaInstancia,
 } from "../whatsapp/evolution-provider";
 import { gerarPlanilhaContatos } from "../contatos/planilha";
+import { BUCKET_MIDIA } from "../midia/midia.service";
+import { ambiente } from "../config/ambiente";
 import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 import { COLUNAS_CANAL, paraCanal, type LinhaCanal } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
@@ -60,6 +64,8 @@ function rotular(canal: Canal): string {
 
 @Injectable()
 export class CanaisService {
+  private readonly logger = new Logger(CanaisService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly auditoria: AuditoriaService,
@@ -274,6 +280,16 @@ export class CanaisService {
       }
     }
 
+    // A foto é buscada no pareamento e quando ainda não existe — não a cada
+    // verificação, que roda de minuto em minuto.
+    if (novoStatus === "conectado" && !canal.fotoUrl) {
+      const foto = await this.guardarFoto(canal);
+      if (foto) {
+        atualizacao.foto_url = foto;
+        atualizacao.foto_em = new Date().toISOString();
+      }
+    }
+
     const { data, error } = await this.supabase
       .tabela("canais")
       .update(atualizacao)
@@ -454,6 +470,42 @@ export class CanaisService {
    * apenas a associação "esta campanha pode usar este canal", que não faz
    * sentido depois que o canal deixou de existir.
    */
+  /**
+   * Baixa a foto do número e guarda no nosso Storage.
+   *
+   * Chamado quando o pareamento é confirmado. Nunca lança: foto é enfeite, e
+   * derrubar a confirmação de conexão por causa dela seria trocar o essencial
+   * pelo acessório.
+   *
+   * O caminho no bucket é fixo por canal (`canais/<id>.jpg`) com `upsert`:
+   * reconectar o mesmo canal atualiza a imagem em vez de acumular arquivo
+   * órfão a cada pareamento.
+   */
+  private async guardarFoto(canal: Canal): Promise<string | null> {
+    try {
+      const foto = await fotoDaInstancia(canal.instanciaEvolution);
+      if (!foto) return null;
+
+      const caminho = `canais/${canal.id}.jpg`;
+      const { error } = await this.supabase.db.storage
+        .from(BUCKET_MIDIA)
+        .upload(caminho, foto.bytes, { contentType: foto.tipo, upsert: true });
+
+      if (error) {
+        this.logger.warn(`Não foi possível guardar a foto de ${canal.nome}: ${error.message}`);
+        return null;
+      }
+
+      const base = ambiente().SUPABASE_URL.replace(/\/+$/, "");
+      // `?v=` com o instante: sem isso o navegador serve a foto antiga do
+      // cache depois de uma troca de imagem no mesmo caminho.
+      return `${base}/storage/v1/object/public/${BUCKET_MIDIA}/${caminho}?v=${Date.now()}`;
+    } catch (e) {
+      this.logger.warn(`Falha ao buscar a foto de ${canal.nome}: ${String(e)}`);
+      return null;
+    }
+  }
+
   /**
    * Quantos contatos a agenda tem AGORA.
    *
