@@ -1,0 +1,29 @@
+# Fim de linha normalizado para LF no repositório.
+#
+# Preventivo, não corretivo: na data em que este arquivo entrou, os dois repos
+# já estavam inteiros em LF no índice (`git add --renormalize .` não encontrou
+# nada para converter). O que ele evita é a divergência futura — `core.autocrlf`
+# é configuração de máquina, e basta um colaborador com outro valor para que um
+# arquivo entre com CRLF e passe a aparecer reescrito por inteiro no diff, sem
+# uma linha ter mudado de fato. Revisão afogada em ruído é revisão que não
+# acontece.
+#
+# `text=auto` deixa o git decidir o que é texto; `eol=lf` fixa o que vai gravado
+# no repositório. Na cópia de trabalho o Windows continua livre para usar CRLF.
+#
+# Se algum dia isto for aplicado a um repositório que JÁ tenha CRLF gravado,
+# rode `git add --renormalize .` uma vez, em commit próprio e separado de
+# qualquer mudança de código — senão a renormalização e o trabalho de verdade
+# chegam misturados na mesma revisão, que é o problema que isto resolve.
+* text=auto eol=lf
+
+# Binários que não podem ser tocados pela normalização.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.xlsx binary
