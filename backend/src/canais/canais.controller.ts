@@ -56,6 +56,7 @@ export class CanaisController {
     return this.canais.reconectar(usuario, id, {
       metodo: corpo.metodoPareamento,
       numero: corpo.numeroPareamento,
+      forcar: corpo.forcar,
     });
   }
 

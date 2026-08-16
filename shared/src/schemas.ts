@@ -243,6 +243,14 @@ export const reconexaoCanalSchema = z
   .object({
     metodoPareamento: z.enum(["qrcode", "codigo"]).default("qrcode"),
     numeroPareamento: z.string().trim().optional(),
+    /**
+     * Confirma derrubar uma sessão que ainda está de pé.
+     *
+     * Reconectar reinicia a instância no gateway. Num canal já conectado isso
+     * não conserta nada e corta qualquer campanha que esteja enviando por ele,
+     * então a rota recusa e devolve 409 até alguém dizer que é isso mesmo.
+     */
+    forcar: z.boolean().optional().default(false),
   })
   .superRefine((v, ctx) => {
     if (v.metodoPareamento === "codigo" && !v.numeroPareamento) {

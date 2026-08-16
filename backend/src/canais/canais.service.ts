@@ -312,12 +312,36 @@ export class CanaisService {
   async reconectar(
     usuario: UsuarioAutenticado,
     id: string,
-    opcoes: { metodo?: MetodoPareamento; numero?: string } = {},
-  ): Promise<{ metodo: MetodoPareamento; qr: string | null; codigo: string | null; expiraEm: string }> {
+    opcoes: { metodo?: MetodoPareamento; numero?: string; forcar?: boolean } = {},
+  ): Promise<{
+    metodo: MetodoPareamento;
+    qr: string | null;
+    codigo: string | null;
+    expiraEm: string;
+    aviso?: string;
+  }> {
     const canal = await this.obter(usuario, id);
     if (canal.tipoConexao !== "qrcode") {
       throw new BadRequestException("Canais de API Oficial não pareiam por QR Code.");
     }
+
+    /*
+     * Reconectar DERRUBA a sessão que estiver de pé — é o restart que produz o
+     * código novo. Num canal que já está conectado isso não conserta nada e
+     * pode cortar um disparo em andamento no meio.
+     *
+     * Perguntamos ao gateway em vez de olhar `canal.status`: o status local é
+     * cache do webhook, e barrar por ele erraria dos dois lados — deixaria
+     * passar quando o webhook morreu com a sessão viva, e barraria um canal
+     * realmente caído que ficou marcado como conectado.
+     */
+    if (!opcoes.forcar && (await estadoDaInstancia(canal.instanciaEvolution)) === "open") {
+      throw new ConflictException(
+        "Este canal já está conectado. Reconectar vai derrubar a sessão atual e " +
+          "interromper qualquer campanha em andamento nele. Confirme para prosseguir.",
+      );
+    }
+
     /*
      * `renovar: true` sempre que se reconecta.
      *
@@ -327,11 +351,36 @@ export class CanaisService {
      * funciona mais.
      */
     const sessao = await this.whatsapp.iniciarSessaoQr(canal, { ...opcoes, renovar: true });
+
+    /*
+     * Some tudo que descrevia o número ANTERIOR.
+     *
+     * A instância é a mesma, o número pode não ser. `numero` e `foto_url` só
+     * eram preenchidos quando estavam vazios, então repareando com outro
+     * chip o canal ficava exibindo a foto e o número de quem saiu — e o
+     * `?v=${Date.now()}` do cache-busting nunca era regravado, porque
+     * `guardarFoto` nem chegava a rodar. Zerando aqui, a verificação seguinte
+     * busca os dois de novo pelo caminho que já existe.
+     */
+    const { error } = await this.supabase
+      .tabela("canais")
+      .update({ numero: null, foto_url: null, foto_em: null })
+      .eq("id", id);
+    if (error) {
+      // Não derruba o pareamento: o QR na tela vale mais que a foto correta, e
+      // a verificação periódica reescreve os dois de qualquer forma.
+      this.logger.warn(`Não foi possível limpar número e foto de ${canal.nome}: ${error.message}`);
+    }
+
     return {
       metodo: sessao.metodo,
       qr: sessao.qr,
       codigo: sessao.codigo,
       expiraEm: sessao.expiraEm,
+      // O aviso vinha sendo descartado aqui: se o webhook não pôde ser
+      // registrado, ou se o gateway devolveu o código anterior, era exatamente
+      // nesta rota que o operador precisava ficar sabendo.
+      ...(sessao.aviso ? { aviso: sessao.aviso } : {}),
     };
   }
 
@@ -407,7 +456,7 @@ export class CanaisService {
     if (canal.tipoConexao !== "qrcode") {
       throw new BadRequestException("Só canais de QR Code têm agenda para extrair.");
     }
-    if (canal.status !== "conectado") {
+    if (!(await this.temSessaoAberta(canal))) {
       // Sem sessão aberta a Evolution devolve lista vazia em vez de erro, e o
       // operador baixaria uma planilha com zero linhas achando que a agenda
       // dele está vazia.
@@ -529,10 +578,34 @@ export class CanaisService {
    */
   async contarContatos(usuario: UsuarioAutenticado, id: string): Promise<{ total: number }> {
     const canal = await this.obter(usuario, id);
-    if (canal.tipoConexao !== "qrcode" || canal.status !== "conectado") {
-      return { total: 0 };
-    }
+    if (canal.tipoConexao !== "qrcode") return { total: 0 };
+    if (!(await this.temSessaoAberta(canal))) return { total: 0 };
     return { total: (await contatosDaInstancia(canal.instanciaEvolution)).length };
+  }
+
+  /**
+   * O canal tem sessão aberta AGORA?
+   *
+   * `canais.status` sozinho não responde: ele é cache do webhook, e o webhook
+   * morre calado — foi exatamente o que 833b580 corrigiu na vigilância do
+   * worker ("o dado sempre esteve no gateway; faltava perguntar"). As rotas de
+   * contatos repetiam o mesmo engano: com o webhook fora do ar, um canal
+   * pareado e funcionando ficava respondendo contagem zero, e a tela concluía
+   * "a agenda ainda não chegou" para sempre. Acusar o WhatsApp do cliente por
+   * uma falha nossa é precisamente a confusão que `docs/ARQUITETURA-ATRIBUICAO-
+   * DE-FALHA.md` existe para impedir.
+   *
+   * O gateway só é consultado quando o cache diz NÃO. Quando ele diz sim já
+   * concorda com o que vamos fazer, e perguntar assim mesmo colocaria uma
+   * chamada HTTP à Evolution em cada volta do laço de contagem.
+   *
+   * `indisponivel` conta como fechado, mas sem gravar nada: não conseguir
+   * perguntar não é a mesma coisa que ter perguntado e ouvido "caiu", e quem
+   * grava status verificado é `verificar()`.
+   */
+  private async temSessaoAberta(canal: Canal): Promise<boolean> {
+    if (canal.status === "conectado") return true;
+    return (await estadoDaInstancia(canal.instanciaEvolution)) === "open";
   }
 
   async excluir(
