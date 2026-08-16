@@ -14,14 +14,44 @@
 -- A coluna e a função continuam existindo: quem quiser voltar a limitar um
 -- número novo é só gravar um valor. O que muda é o padrão.
 --
--- Idempotente.
+-- Idempotente: os `alter` e o `create or replace` podem reexecutar à vontade, e
+-- o `update` é preso ao estado que só existe ANTES desta migration rodar (veja
+-- abaixo).
 -- ============================================================================
 
-alter table canais alter column limite_diario drop not null;
-alter table canais alter column limite_diario drop default;
+/*
+ * O `update` roda UMA vez só, e quem garante isso é o próprio schema.
+ *
+ * `update canais set limite_diario = null` solto é destrutivo na segunda
+ * execução: migration roda sobre banco no ar e pode ser reaplicada, e a versão
+ * larga apagaria, calada, todo teto que alguém tivesse religado DEPOIS. O
+ * cliente configura 500, a migration passa de novo num deploy, o canal volta a
+ * ilimitado sem registro nenhum — e o único sintoma é um número disparando
+ * acima do que o dono mandou, o oposto do que a coluna existe para fazer.
+ *
+ * `is_nullable = 'NO'` só é verdade ANTES do `drop not null` logo abaixo, então
+ * ele distingue a primeira execução das seguintes sem precisar de tabela de
+ * controle nem de adivinhar quais valores foram automáticos.
+ */
+do $$
+declare
+  primeira_vez boolean;
+begin
+  select is_nullable = 'NO'
+    into primeira_vez
+    from information_schema.columns
+   where table_schema = 'public'
+     and table_name = 'canais'
+     and column_name = 'limite_diario';
 
--- Os canais que já existem passam a ser ilimitados: nenhum deles pediu teto.
-update canais set limite_diario = null where limite_diario is not null;
+  alter table canais alter column limite_diario drop not null;
+  alter table canais alter column limite_diario drop default;
+
+  -- Os canais que já existiam passam a ser ilimitados: nenhum deles pediu teto.
+  if coalesce(primeira_vez, false) then
+    update canais set limite_diario = null where limite_diario is not null;
+  end if;
+end $$;
 
 /**
  * Consome a cota do dia, respeitando "sem teto".
