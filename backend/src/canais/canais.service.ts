@@ -21,6 +21,7 @@ import {
   contatosDaInstancia,
   estadoDaInstancia,
   excluirInstancia,
+  numeroDaInstancia,
 } from "../whatsapp/evolution-provider";
 import { gerarPlanilhaContatos } from "../contatos/planilha";
 import { empresaParaEscrita, noEscopo } from "../comum/escopo";
@@ -158,7 +159,9 @@ export class CanaisService {
         instancia_evolution: instancia,
         tipo_conexao: "qrcode",
         status: "aguardando_qr",
-        limite_diario: dados.limiteDiario || limiteSugerido(dados.estagioAquecimento),
+        // `?? null`, não `||`: o padrão passou a ser SEM teto, e `||` faria
+        // qualquer ausência cair no limite sugerido do aquecimento de novo.
+        limite_diario: dados.limiteDiario ?? null,
         estagio_aquecimento: dados.estagioAquecimento,
         criado_por: usuario.id,
         empresa_id: empresaParaEscrita(usuario),
@@ -253,13 +256,26 @@ export class CanaisService {
       return { canal, confirmado: false };
     }
 
+    const atualizacao: Record<string, unknown> = {
+      status: novoStatus,
+      estado_gateway: estado,
+      estado_verificado_em: new Date().toISOString(),
+    };
+
+    // O número vem do gateway quando falta. Depender só do webhook deixava um
+    // canal pareado sem número — e a tela, corretamente, dizia que o
+    // pareamento não tinha terminado.
+    if (canal.numero === null) {
+      const numero = await numeroDaInstancia(canal.instanciaEvolution);
+      if (numero) {
+        atualizacao.numero = numero;
+        atualizacao.conectado_em = new Date().toISOString();
+      }
+    }
+
     const { data, error } = await this.supabase
       .tabela("canais")
-      .update({
-        status: novoStatus,
-        estado_gateway: estado,
-        estado_verificado_em: new Date().toISOString(),
-      })
+      .update(atualizacao)
       .eq("id", id)
       .select(COLUNAS_CANAL)
       .single();

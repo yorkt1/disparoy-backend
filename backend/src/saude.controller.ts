@@ -58,6 +58,14 @@ export class SaudeController {
         nome: usuario.nome,
         email: usuario.email,
         papel: usuario.papel,
+        /**
+         * `null` é a conta de administração do sistema.
+         *
+         * O painel precisa distinguir isso de `papel: "admin"`: cada empresa
+         * cliente tem o próprio admin, e ele administra a EMPRESA. Só quem não
+         * pertence a nenhuma administra o sistema.
+         */
+        empresaId: usuario.empresaId,
       },
       integracao: this.whatsapp.estadoIntegracao(),
       disparo: await this.estadoDisparo(),

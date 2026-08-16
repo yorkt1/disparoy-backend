@@ -7,7 +7,7 @@ import type {
   Spintax,
 } from "@disparoy/dominio";
 import { categoriaDe, explicar, paraCampanha, statusDoGateway } from "@disparoy/dominio";
-import { estadoDaInstancia } from "../whatsapp/evolution-provider";
+import { estadoDaInstancia, numeroDaInstancia } from "../whatsapp/evolution-provider";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { WhatsappService } from "../whatsapp/whatsapp.service";
@@ -505,11 +505,20 @@ export class DisparoService {
    * derrubou retomam sozinhas.
    */
   private async vigiarCanais(): Promise<void> {
+    /*
+     * `aguardando_qr` entra na lista.
+     *
+     * Ficava de fora porque "ainda não pareou" parecia não ter o que verificar.
+     * Mas o canal só sai desse estado pelo webhook `CONNECTION_UPDATE` — e o
+     * webhook é justamente o que falha quando `APP_URL_PUBLICA` não é
+     * alcançável pelo gateway. Resultado: número pareado de verdade, com sessão
+     * aberta, preso em "Aguardando QR" para sempre, sem nada que o corrigisse.
+     */
     const { data, error } = await this.supabase
       .tabela("canais")
-      .select("id, nome, status, instancia_evolution")
+      .select("id, nome, status, numero, instancia_evolution")
       .eq("tipo_conexao", "qrcode")
-      .in("status", ["conectado", "desconectado"]);
+      .in("status", ["conectado", "desconectado", "aguardando_qr"]);
 
     if (error) {
       this.logger.error(`Não foi possível listar canais para vigiar: ${error.message}`);
@@ -520,6 +529,7 @@ export class DisparoService {
       id: string;
       nome: string;
       status: string;
+      numero: string | null;
       instancia_evolution: string;
     }[];
 
@@ -533,14 +543,31 @@ export class DisparoService {
       const real = statusDoGateway(estado);
       if (real === null) continue;
 
-      await this.supabase
-        .tabela("canais")
-        .update({
-          status: real,
-          estado_gateway: estado,
-          estado_verificado_em: new Date().toISOString(),
-        })
-        .eq("id", canal.id);
+      /*
+       * O número também vem daqui quando falta.
+       *
+       * `canais.numero` era preenchido só pelo webhook, a partir do `ownerJid`.
+       * Sem webhook alcançável, um canal pareado ficava sem número — e a tela,
+       * vendo "conectado sem número", concluía corretamente que o pareamento
+       * não tinha terminado. O dado sempre esteve no gateway; faltava perguntar.
+       */
+      const atualizacao: Record<string, unknown> = {
+        status: real,
+        estado_gateway: estado,
+        estado_verificado_em: new Date().toISOString(),
+      };
+
+      if (canal.numero === null) {
+        const numero = await numeroDaInstancia(canal.instancia_evolution);
+        if (numero) {
+          atualizacao.numero = numero;
+          // Quem pareou de fato já estava conectado antes desta verificação;
+          // sem isto a coluna ficaria eternamente vazia na tela.
+          atualizacao.conectado_em = new Date().toISOString();
+        }
+      }
+
+      await this.supabase.tabela("canais").update(atualizacao).eq("id", canal.id);
 
       if (real === canal.status) continue;
 

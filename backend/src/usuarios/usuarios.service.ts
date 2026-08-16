@@ -7,6 +7,7 @@ import { AuditoriaService } from "../auditoria/auditoria.service";
 import { COLUNAS_PERFIL, paraUsuario, type LinhaPerfil } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { gerarHash } from "../auth/senha";
+import { noEscopo } from "../comum/escopo";
 
 @Injectable()
 export class UsuariosService {
@@ -15,11 +16,17 @@ export class UsuariosService {
     private readonly auditoria: AuditoriaService,
   ) {}
 
-  async listar(): Promise<Usuario[]> {
-    const { data, error } = await this.supabase
-      .tabela("perfis")
-      .select(COLUNAS_PERFIL)
-      .order("criado_em");
+  /**
+   * Acessos que o autor pode ver.
+   *
+   * A conta global vê todos, inclusive os de outras empresas — é ela quem os
+   * criou. Um admin de empresa vê só a própria gente.
+   */
+  async listar(autor: UsuarioAutenticado): Promise<Usuario[]> {
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("perfis").select(COLUNAS_PERFIL),
+      autor,
+    ).order("criado_em");
 
     if (error) throw new Error(`Falha ao listar usuários: ${error.message}`);
     return (data as unknown as LinhaPerfil[]).map(paraUsuario);
@@ -42,6 +49,28 @@ export class UsuariosService {
   ): Promise<Usuario> {
     const email = dados.email.trim().toLowerCase();
 
+    /*
+     * A qual empresa o novo acesso pertence.
+     *
+     * A conta de administração é global e escolhe: é ela que cria o login de
+     * cada empresa cliente. Um admin DE UMA empresa só cria gente na própria —
+     * aceitar `empresaId` dele seria deixá-lo plantar um acesso dentro de
+     * outra empresa.
+     *
+     * `null` só é possível pela conta global, e cria outra conta global: é
+     * assim que se faz um segundo administrador de sistema.
+     */
+    const empresaId = autor.empresaId === null ? (dados.empresaId ?? null) : autor.empresaId;
+
+    if (empresaId !== null) {
+      const { data: existe } = await this.supabase
+        .tabela("empresas")
+        .select("id")
+        .eq("id", empresaId)
+        .maybeSingle();
+      if (!existe) throw new BadRequestException("Empresa não encontrada.");
+    }
+
     const { data, error } = await this.supabase
       .tabela("perfis")
       .insert({
@@ -51,6 +80,7 @@ export class UsuariosService {
         ativo: true,
         senha_hash: await gerarHash(dados.senha),
         criado_por: autor.id,
+        empresa_id: empresaId,
       })
       .select("id")
       .single();
@@ -73,7 +103,7 @@ export class UsuariosService {
       entidadeId: id,
       entidadeRotulo: `${dados.nome} <${dados.email}>`,
       ip,
-      detalhes: { papel: dados.papel },
+      detalhes: { papel: dados.papel, empresaId: empresaId ?? "global" },
     });
 
     return this.obter(id);

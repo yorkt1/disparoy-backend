@@ -215,7 +215,8 @@ export const geracaoVariacoesSchema = z.object({
 export const canalEntradaSchema = z
   .object({
     nome: z.string().trim().min(2).max(60),
-    limiteDiario: z.number().int().min(1).max(100_000).default(LIMITES.limiteDiarioNumeroNovo),
+    /** `null` = sem teto diário, que é o padrão agora. */
+    limiteDiario: z.number().int().min(1).max(100_000).nullable().default(null),
     estagioAquecimento: z.number().int().min(0).max(3).default(0),
     metodoPareamento: z.enum(["qrcode", "codigo"]).default("qrcode"),
     /** E.164 do celular que vai parear. Só no método `codigo`. */
@@ -298,6 +299,14 @@ export const novoUsuarioSchema = z.object({
   email: z.string().trim().email(),
   senha: senhaSchema,
   papel: z.enum(["admin", "operator"]).default("operator"),
+  /**
+   * A empresa do novo acesso. Só a conta de administração pode escolher.
+   *
+   * `null` cria outro acesso GLOBAL — é assim que nasce um segundo
+   * administrador de sistema. Quando quem cria pertence a uma empresa, este
+   * campo é ignorado e o acesso herda a empresa dele.
+   */
+  empresaId: z.string().uuid().nullable().optional(),
 });
 
 /**

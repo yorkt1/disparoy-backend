@@ -18,6 +18,7 @@ import { UsuariosModule } from "./usuarios/usuarios.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { AvisosModule } from "./avisos/avisos.module";
 import { DiagnosticoModule } from "./diagnostico/diagnostico.module";
+import { EmpresasModule } from "./empresas/empresas.module";
 import { SaudeController } from "./saude.controller";
 
 @Module({
@@ -47,6 +48,7 @@ import { SaudeController } from "./saude.controller";
     CampanhasModule,
     AvisosModule,
     DiagnosticoModule,
+    EmpresasModule,
     UsuariosModule,
     WebhooksModule,
   ],

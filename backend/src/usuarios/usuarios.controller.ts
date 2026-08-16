@@ -14,8 +14,8 @@ export class UsuariosController {
   constructor(private readonly usuarios: UsuariosService) {}
 
   @Get()
-  async listar() {
-    return { usuarios: await this.usuarios.listar() };
+  async listar(@Usuario() autor: UsuarioAutenticado) {
+    return { usuarios: await this.usuarios.listar(autor) };
   }
 
   @Post()

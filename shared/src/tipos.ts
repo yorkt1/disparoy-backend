@@ -71,8 +71,16 @@ export interface Canal {
   instanciaEvolution: string;
   tipoConexao: TipoConexao;
   status: StatusCanal;
-  /** Teto de mensagens por dia; protege número novo de volume alto demais. */
-  limiteDiario: number;
+  /**
+   * Teto de mensagens por dia, ou `null` para sem limite.
+   *
+   * Nasceu como proteção anti-bloqueio de número novo. Virou opcional porque o
+   * dono do número decide o próprio risco — e um teto de 50 fazia uma campanha
+   * de mil contatos levar vinte dias sem ninguém ter pedido isso.
+   *
+   * `null` é diferente de `0`: zero seria "não pode enviar nada".
+   */
+  limiteDiario: number | null;
   /** 0 = número novo. Sobe conforme o número amadurece. */
   estagioAquecimento: number;
   enviadasHoje: number;
@@ -102,8 +110,15 @@ export interface MembroCanal {
   permissao: PermissaoCanal;
 }
 
-/** Quanto do teto diário do canal já foi consumido (0..100). */
-export function consumoDoCanal(canal: Canal): number {
+/**
+ * Quanto do teto diário do canal já foi consumido (0..100).
+ *
+ * `null` quando não há teto: sem limite não existe "percentual consumido", e
+ * devolver 0 faria uma barra de progresso vazia sugerir que ainda há muito a
+ * usar de um limite que não existe.
+ */
+export function consumoDoCanal(canal: Canal): number | null {
+  if (canal.limiteDiario === null) return null;
   if (canal.limiteDiario <= 0) return 100;
   return Math.min(Math.round((canal.enviadasHoje / canal.limiteDiario) * 100), 100);
 }
@@ -344,6 +359,7 @@ export type AcaoLog =
   | "lista.criada"
   | "lista.excluida"
   | "sessao.iniciada"
+  | "empresa.criada"
   | "usuario.criado"
   | "usuario.papel_alterado"
   // Redefinida: um admin trocou a senha de OUTRA pessoa. Alterada: a própria
@@ -362,7 +378,8 @@ export type TipoEntidade =
   | "midia"
   | "contato"
   | "lista"
-  | "usuario";
+  | "usuario"
+  | "empresa";
 
 export interface LogAuditoria {
   id: string;
