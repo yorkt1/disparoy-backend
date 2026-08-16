@@ -19,6 +19,7 @@ import { AuditoriaService } from "../auditoria/auditoria.service";
 import { WhatsappService } from "../whatsapp/whatsapp.service";
 import {
   contatosDaInstancia,
+  esquecerAgenda,
   estadoDaInstancia,
   excluirInstancia,
   numeroDaInstancia,
@@ -502,6 +503,10 @@ export class CanaisService {
 
     const { error } = await this.supabase.tabela("canais").delete().eq("id", id);
     if (error) throw new Error(`Falha ao excluir canal: ${error.message}`);
+
+    // A agenda em cache não pode sobreviver ao canal: um número novo criado
+    // com a mesma instância herdaria os contatos do anterior.
+    esquecerAgenda(canal.instanciaEvolution);
 
     // Depois do banco: apagar a instância primeiro e falhar no DELETE deixaria
     // um canal no painel apontando para uma instância que não existe mais.

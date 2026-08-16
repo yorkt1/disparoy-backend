@@ -442,9 +442,33 @@ export interface ContatoDaAgenda {
  * `pushName`, ora em `name`. Ler as três formas custa pouco e evita que uma
  * atualização do gateway devolva uma planilha vazia sem nenhum erro visível.
  */
-export async function contatosDaInstancia(instancia: string): Promise<ContatoDaAgenda[]> {
+/**
+ * Cache curto da agenda, por instância.
+ *
+ * A busca custa ~860 ms, quase tudo rede até a VPS da Evolution — o
+ * processamento aqui é 130 ms. Como a tela consulta a contagem antes de baixar,
+ * sem cache a MESMA agenda era buscada duas vezes em dois segundos.
+ *
+ * Cinco minutos porque agenda de WhatsApp muda devagar, e a extração é um ato
+ * pontual: quem acabou de parear vai baixar nos próximos minutos, e quem
+ * recarrega a página no meio disso não deveria pagar a busca de novo.
+ */
+const CACHE_AGENDA_MS = 5 * 60_000;
+const cacheAgenda = new Map<string, { contatos: ContatoDaAgenda[]; expiraEm: number }>();
+
+export async function contatosDaInstancia(
+  instancia: string,
+  /** `true` ignora o cache — usado quando o operador pede explicitamente. */
+  forcar = false,
+): Promise<ContatoDaAgenda[]> {
   if (!evolutionConfigurada()) {
     throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
+  }
+
+  const agora = Date.now();
+  const guardado = cacheAgenda.get(instancia);
+  if (!forcar && guardado && guardado.expiraEm > agora) {
+    return guardado.contatos;
   }
 
   const bruto = await chamar<unknown>(CAMINHOS.buscarContatos(instancia), {
@@ -452,7 +476,25 @@ export async function contatosDaInstancia(instancia: string): Promise<ContatoDaA
     body: JSON.stringify({ where: {} }),
   });
 
-  return mapearAgenda(bruto);
+  const contatos = mapearAgenda(bruto);
+
+  /*
+   * Agenda vazia NÃO entra no cache.
+   *
+   * Logo depois do pareamento a Evolution responde lista vazia enquanto o
+   * WhatsApp ainda sincroniza. Guardar esse vazio por cinco minutos
+   * congelaria exatamente o estado que a tela está esperando passar.
+   */
+  if (contatos.length > 0) {
+    cacheAgenda.set(instancia, { contatos, expiraEm: agora + CACHE_AGENDA_MS });
+  }
+
+  return contatos;
+}
+
+/** Descarta a agenda guardada — o canal saiu, o cache não pode sobreviver a ele. */
+export function esquecerAgenda(instancia: string): void {
+  cacheAgenda.delete(instancia);
 }
 
 /**
