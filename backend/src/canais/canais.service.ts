@@ -352,6 +352,11 @@ export class CanaisService {
      */
     const sessao = await this.whatsapp.iniciarSessaoQr(canal, { ...opcoes, renovar: true });
 
+    // A agenda guardada descreve o número anterior tanto quanto `numero` e
+    // `foto_url` logo abaixo — e é a única das três que não está no banco, então
+    // limpar só as colunas deixaria justamente o dado pessoal para trás.
+    esquecerAgenda(canal.instanciaEvolution);
+
     /*
      * Some tudo que descrevia o número ANTERIOR.
      *
@@ -396,6 +401,20 @@ export class CanaisService {
     // pareado na Evolution enquanto aparece como desconectado aqui.
     if (dados.status === "desconectado" && canal.tipoConexao === "qrcode") {
       await this.whatsapp.encerrarSessaoQr(canal).catch(() => undefined);
+
+      /*
+       * A agenda em cache não pode sobreviver ao número que saiu.
+       *
+       * `excluir` já esquecia, e o raciocínio é o mesmo aqui — só que este é o
+       * caminho COMUM: desconectar e parear outro chip reaproveita a instância,
+       * enquanto excluir o canal é raro. Sem isto, `contarContatos` e
+       * `extrairContatos` entregam por até cinco minutos a agenda do chip
+       * anterior para quem acabou de conectar o próprio, e o operador baixa uma
+       * planilha com telefones de terceiros sem nenhum sinal de que estão
+       * errados. É o vazamento que o comentário de `excluir` diz querer evitar,
+       * entrando pela porta ao lado.
+       */
+      esquecerAgenda(canal.instanciaEvolution);
     }
 
     const atualizacao: Record<string, unknown> = {};
