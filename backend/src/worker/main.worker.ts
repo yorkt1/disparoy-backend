@@ -3,11 +3,13 @@ import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { WorkerModule } from "./worker.module";
 import { DisparoService } from "./disparo.service";
+import { ObservabilidadeService } from "../observabilidade/observabilidade.service";
 import {
   FILA_CAMPANHA,
   FILA_CONTATO,
   FILA_MANUTENCAO,
   FILA_MORTOS,
+  FILA_RETENCAO,
   FilaService,
   type JobCampanha,
   type JobContato,
@@ -29,6 +31,7 @@ async function iniciar() {
 
   const fila = app.get(FilaService);
   const disparo = app.get(DisparoService);
+  const observabilidade = app.get(ObservabilidadeService);
   const boss = fila.instancia();
 
   // Planejamento: um de cada vez, porque é rápido e só enfileira.
@@ -61,6 +64,16 @@ async function iniciar() {
   await fila.agendarManutencao();
 
   /**
+   * Expurgo de `mensagens_enviadas`, uma vez por dia — fila própria, e não
+   * dentro de `FILA_MANUTENCAO`. Ver o comentário de `FILA_RETENCAO` em
+   * `fila.service.ts` para o motivo de não rodar a cada minuto.
+   */
+  await boss.work(FILA_RETENCAO, { batchSize: 1 }, async () => {
+    await disparo.purgarMensagensAntigas();
+  });
+  await fila.agendarRetencao();
+
+  /**
    * Dead letter: jobs que esgotaram as tentativas.
    *
    * `createQueue` já apontava as duas filas para cá desde o começo, mas nada
@@ -72,8 +85,8 @@ async function iniciar() {
   });
 
   logger.log(
-    `Worker ativo — filas "${FILA_CAMPANHA}", "${FILA_CONTATO}" e "${FILA_MANUTENCAO}" ` +
-      `(concorrência ${disparo.concorrenciaPorCanal()}).`,
+    `Worker ativo — filas "${FILA_CAMPANHA}", "${FILA_CONTATO}", "${FILA_MANUTENCAO}" e ` +
+      `"${FILA_RETENCAO}" (concorrência ${disparo.concorrenciaPorCanal()}).`,
   );
 
   /**
@@ -110,12 +123,24 @@ async function iniciar() {
    * voltam para a fila e o reaper cuida do resto. Ficar de pé "meio quebrado"
    * é o cenário em que a campanha para sem ninguém perceber.
    */
+  /*
+   * O alerta aqui é MELHOR-ESFORÇO, não a defesa principal.
+   *
+   * Quem detecta de verdade o worker morto é o vigia do pulso, rodando na API
+   * (`VigiaWorkerService`) — de FORA deste processo, porque um processo que
+   * travou ou levou SIGKILL não tem como avisar coisa nenhuma. O que sai
+   * daqui só ajuda no caso feliz: uma exceção JS que ainda dá tempo de um
+   * `fetch` sair antes do `process.exit`. Não substitui o vigia, complementa:
+   * quando funciona, chega minutos antes e já vem com o motivo.
+   */
   process.on("unhandledRejection", (motivo) => {
     logger.error(`Promessa rejeitada sem tratamento: ${String(motivo)}`);
+    observabilidade.relatarErro("Worker — promessa rejeitada sem tratamento", motivo);
     void encerrar("unhandledRejection");
   });
   process.on("uncaughtException", (erro) => {
     logger.error(`Exceção não capturada: ${erro.stack ?? erro.message}`);
+    observabilidade.relatarErro("Worker — exceção não capturada", erro);
     void encerrar("uncaughtException");
   });
 }

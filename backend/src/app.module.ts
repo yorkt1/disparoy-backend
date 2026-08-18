@@ -19,11 +19,14 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
 import { AvisosModule } from "./avisos/avisos.module";
 import { DiagnosticoModule } from "./diagnostico/diagnostico.module";
 import { EmpresasModule } from "./empresas/empresas.module";
+import { VigiaModule } from "./vigia/vigia.module";
+import { ObservabilidadeModule } from "./observabilidade/observabilidade.module";
 import { SaudeController } from "./saude.controller";
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: [".env.local", ".env"] }),
+    ObservabilidadeModule,
     /**
      * Rate limiting global.
      *
@@ -51,6 +54,7 @@ import { SaudeController } from "./saude.controller";
     EmpresasModule,
     UsuariosModule,
     WebhooksModule,
+    VigiaModule,
   ],
   controllers: [SaudeController],
   providers: [

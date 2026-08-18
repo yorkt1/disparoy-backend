@@ -26,7 +26,7 @@ import { COLUNAS_CANAL, paraCanal, type LinhaCanal } from "../comum/mapeadores";
 import { ambiente } from "../config/ambiente";
 
 const COLUNAS_EXECUCAO =
-  "id, nome, status, rodada, sequencia, iniciada_em, validar_numeros, " +
+  "id, nome, status, rodada, sequencia, iniciada_em, validar_numeros, empresa_id, " +
   "intervalo_contatos_min, intervalo_contatos_max, intervalo_mensagens_min, intervalo_mensagens_max";
 
 interface LinhaExecucao {
@@ -37,6 +37,10 @@ interface LinhaExecucao {
   sequencia: unknown;
   iniciada_em: string | null;
   validar_numeros: boolean;
+  // Não é opcional no banco (`empresa_obrigatoria`), mas a coluna é lida como
+  // string | null aqui porque um SELECT montado em runtime não carrega o
+  // "not null" do schema — só o dado que veio.
+  empresa_id: string | null;
   intervalo_contatos_min: number;
   intervalo_contatos_max: number;
   intervalo_mensagens_min: number;
@@ -52,6 +56,13 @@ interface CampanhaEmExecucao {
   sequencia: MensagemSequencia[];
   iniciadaEm: string | null;
   validarNumeros: boolean;
+  /**
+   * Dona da campanha — carregada só para marcar a auditoria dos eventos que o
+   * PRÓPRIO worker gera (`campanha.pausada` por reconciliação, `campanha.
+   * concluida`). Sem isto, `AuditoriaService.registrar` não tem como derivar a
+   * empresa: não há `usuarioId` num evento de sistema, é `null` de propósito.
+   */
+  empresaId: string | null;
   intervaloContatosMin: number;
   intervaloContatosMax: number;
   intervaloMensagensMin: number;
@@ -753,6 +764,28 @@ export class DisparoService {
     }
   }
 
+  /**
+   * Expurgo de `mensagens_enviadas` — chamado pela fila `retencao`, uma vez
+   * por dia, não pela `manutencao` de minuto em minuto.
+   *
+   * Só apaga de campanha `concluida`/`falhou`: uma pausada pode retomar, e a
+   * retomada lê `passo` desta mesma tabela para saber onde parou (ver
+   * `ROBUSTEZ.md`) — apagar essas linhas destruiria o estado que evita
+   * reenviar mensagem já entregue.
+   */
+  async purgarMensagensAntigas(dias = 365): Promise<void> {
+    const { data, error } = await this.supabase.db.rpc("purgar_mensagens_antigas", {
+      p_dias: dias,
+    });
+    if (error) {
+      this.logger.error(`Expurgo de mensagens antigas falhou: ${error.message}`);
+      return;
+    }
+    if (typeof data === "number" && data > 0) {
+      this.logger.log(`${data} mensagem(ns) com mais de ${dias} dias removidas.`);
+    }
+  }
+
   // ------------------------------------------------------------------------
   // Apoio
   // ------------------------------------------------------------------------
@@ -807,6 +840,7 @@ export class DisparoService {
       sequencia: Array.isArray(l.sequencia) ? (l.sequencia as MensagemSequencia[]) : [],
       iniciadaEm: l.iniciada_em,
       validarNumeros: l.validar_numeros,
+      empresaId: l.empresa_id,
       intervaloContatosMin: l.intervalo_contatos_min,
       intervaloContatosMax: l.intervalo_contatos_max,
       intervaloMensagensMin: l.intervalo_mensagens_min,
@@ -1006,6 +1040,10 @@ export class DisparoService {
       tipoEntidade: "campanha",
       entidadeId: job.campanhaId,
       entidadeRotulo: campanha?.nome ?? job.campanhaId,
+      // Explícito e não derivado: não há usuário para consultar em `perfis`
+      // aqui, o autor é o próprio worker. Sem isto o log ficaria sem dono e
+      // invisível ao admin da empresa — só a conta global o veria.
+      empresaId: campanha?.empresaId ?? null,
       detalhes: { motivo },
     });
   }
@@ -1025,6 +1063,7 @@ export class DisparoService {
       tipoEntidade: "campanha",
       entidadeId: campanhaId,
       entidadeRotulo: campanha?.nome ?? campanhaId,
+      empresaId: campanha?.empresaId ?? null,
     });
     this.logger.log(`Campanha ${campanha?.nome ?? campanhaId} concluída.`);
   }

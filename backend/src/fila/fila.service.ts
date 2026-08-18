@@ -12,8 +12,15 @@ export const FILA_CAMPANHA = "disparo-campanha";
 export const FILA_CONTATO = "disparo-contato";
 /** Jobs que esgotaram as tentativas. Não são reprocessados: são evidência. */
 export const FILA_MORTOS = "disparo-mortos";
-/** Reconciliação, métricas e retenção. Disparada por cron do pg-boss. */
+/** Reconciliação, métricas e retenção dos avisos/eventos. Cron de 1 min. */
 export const FILA_MANUTENCAO = "manutencao";
+/**
+ * Expurgo de `mensagens_enviadas`. Cron PRÓPRIO, diário, e não dentro de
+ * `FILA_MANUTENCAO`: aquela roda de minuto em minuto, e um DELETE com JOIN
+ * sobre a tabela que mais cresce no sistema não pode rodar 1.440 vezes por
+ * dia só para achar zero linha na esmagadora maioria delas.
+ */
+export const FILA_RETENCAO = "retencao";
 
 export interface JobCampanha {
   campanhaId: string;
@@ -105,6 +112,7 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
       // ao menos fica guardado, com o payload que falhou.
       await boss.createQueue(FILA_CONTATO, { name: FILA_CONTATO, deadLetter: FILA_MORTOS });
       await boss.createQueue(FILA_MANUTENCAO);
+      await boss.createQueue(FILA_RETENCAO);
     } catch (e) {
       const motivo =
         `Não foi possível conectar a fila ao Postgres: ${descreverFalha(e)}\n\n` +
@@ -139,6 +147,21 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
   /** True quando a API subiu sem fila (só possível com `FILA_OPCIONAL`). */
   get indisponivel(): boolean {
     return this.boss === null;
+  }
+
+  /**
+   * Acesso cru que NÃO lança quando a fila está indisponível.
+   *
+   * `instancia()` continua lançando de propósito: quem depende de verdade da
+   * fila — o worker, o envio de campanha — precisa saber na hora que não tem
+   * como funcionar. Isto aqui é para consumidor OPCIONAL do lado da API, como
+   * o vigia do pulso do worker: sem fila configurada, ele simplesmente não
+   * tem o que vigiar, e a API já subiu sem fila de propósito via
+   * `FILA_OPCIONAL` — travar o boot por causa de um vigia secundário
+   * contradiria essa decisão.
+   */
+  get bossOpcional(): PgBoss | null {
+    return this.boss;
   }
 
   private exigirBoss(): PgBoss {
@@ -215,6 +238,11 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
    */
   async agendarManutencao(): Promise<void> {
     await this.exigirBoss().schedule(FILA_MANUTENCAO, "* * * * *", {}, { retryLimit: 0 });
+  }
+
+  /** Uma vez por dia, de madrugada — ver o comentário de `FILA_RETENCAO`. */
+  async agendarRetencao(): Promise<void> {
+    await this.exigirBoss().schedule(FILA_RETENCAO, "17 3 * * *", {}, { retryLimit: 0 });
   }
 
   /**
