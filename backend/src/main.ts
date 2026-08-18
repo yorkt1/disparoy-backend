@@ -6,6 +6,7 @@ import { AppModule } from "./app.module";
 import { ambiente, origemPermitida, origensPermitidas } from "./config/ambiente";
 import { FiltroExcecoes } from "./comum/excecoes.filter";
 import { cabecalhosDeSeguranca } from "./comum/seguranca.middleware";
+import { ObservabilidadeService } from "./observabilidade/observabilidade.service";
 
 async function iniciar() {
   const env = ambiente();
@@ -27,7 +28,9 @@ async function iniciar() {
   // `/` fica de fora do prefixo: é o que o navegador abre ao colar a URL do
   // serviço, e um "Cannot GET /" ali parece deploy quebrado. Só essa rota.
   app.setGlobalPrefix("api", { exclude: [{ path: "/", method: RequestMethod.GET }] });
-  app.useGlobalFilters(new FiltroExcecoes());
+  // Instanciado à mão porque `useGlobalFilters` roda fora do container do
+  // Nest — `app.get(...)` é o jeito de pedir uma dependência já resolvida.
+  app.useGlobalFilters(new FiltroExcecoes(app.get(ObservabilidadeService)));
   app.enableCors({
     // Callback, e não a lista crua, porque as entradas aceitam `*` — sem isso
     // cada deploy novo da Vercel exigiria editar a variável no painel.

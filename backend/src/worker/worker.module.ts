@@ -4,6 +4,7 @@ import { SupabaseModule } from "../supabase/supabase.module";
 import { AuditoriaModule } from "../auditoria/auditoria.module";
 import { WhatsappModule } from "../whatsapp/whatsapp.module";
 import { FilaModule } from "../fila/fila.module";
+import { ObservabilidadeModule } from "../observabilidade/observabilidade.module";
 import { DisparoService } from "./disparo.service";
 
 /**
@@ -17,6 +18,7 @@ import { DisparoService } from "./disparo.service";
     AuditoriaModule,
     WhatsappModule,
     FilaModule,
+    ObservabilidadeModule,
   ],
   providers: [DisparoService],
 })

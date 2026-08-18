@@ -123,6 +123,24 @@ const schema = z.object({
 
   /** Envios simultâneos por canal. Subir demais é convite a bloqueio. */
   DISPARO_CONCORRENCIA_POR_CANAL: z.coerce.number().int().min(1).max(20).default(1),
+
+  // --- Observabilidade externa (opcional) ---------------------------------
+  /**
+   * URL que recebe um POST com JSON a cada erro não classificado (500 da API,
+   * exceção não tratada no worker).
+   *
+   * NÃO é a integração com uma ferramenta específica — não há SDK de Sentry
+   * nem de nenhum APM aqui dentro, só um `fetch` com corpo genérico. Serve
+   * para apontar direto a um webhook de entrada do Slack/Discord/Teams (todos
+   * aceitam POST de JSON simples) ou a qualquer endpoint próprio que
+   * repasse para onde quiser depois — inclusive um projeto Sentry, através de
+   * algo que traduza o webhook para a API deles.
+   *
+   * Sem isto configurado, os erros continuam só no log do Render — o que
+   * funciona enquanto alguém está olhando, e não avisa ninguém quando não
+   * está.
+   */
+  ALERTA_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
 })
   // Meio par de credenciais não cria admin nenhum e falha calado no boot;
   // é melhor a API recusar subir e dizer o que falta.
