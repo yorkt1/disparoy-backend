@@ -1,4 +1,3 @@
-import type { Canal } from "@disparoy/dominio";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mapearAgenda } from "./evolution-provider.js";
 
@@ -66,16 +65,19 @@ describe("mapearAgenda", () => {
 });
 
 /**
- * O cache é indexado pela INSTÂNCIA, e a instância sobrevive à troca de número.
- * Estes testes existem porque o vazamento é invisível: nada falha, a planilha
- * simplesmente sai com a agenda de outra pessoa.
+ * Não existe mais cache com prazo — só deduplicação de chamadas EM VOO, no
+ * mesmo processo. Estes testes existem porque o comportamento anterior (5 min
+ * guardados) causava um vazamento invisível entre réplicas: nada falhava, a
+ * planilha simplesmente saía com a agenda de outra pessoa. Ver o comentário de
+ * `contatosDaInstancia` em `evolution-provider.ts` para o motivo da troca.
  */
-describe("cache da agenda", () => {
-  const canal = { id: "canal-1", instanciaEvolution: "inst" } as Canal;
+describe("busca da agenda", () => {
   const agendaCrua = [{ remoteJid: "5548991237324@s.whatsapp.net", pushName: "Gui" }];
 
   /** Quantas vezes o gateway foi consultado de verdade. */
   let buscas = 0;
+  /** Atrasa a resposta para poder simular duas chamadas realmente concorrentes. */
+  let atrasoMs = 0;
 
   const responder = (corpo: unknown) =>
     new Response(JSON.stringify(corpo), {
@@ -84,8 +86,8 @@ describe("cache da agenda", () => {
     });
 
   /**
-   * Import dinâmico a cada teste: o cache é módulo-privado, então cache limpo é
-   * módulo novo.
+   * Import dinâmico a cada teste: a deduplicação é módulo-privada, então
+   * estado limpo é módulo novo.
    */
   async function carregarProvedor() {
     Object.assign(process.env, {
@@ -97,8 +99,6 @@ describe("cache da agenda", () => {
       EVOLUTION_API_URL: "https://evolution.example.com",
       EVOLUTION_API_KEY: "chave-de-teste",
       EVOLUTION_WEBHOOK_SECRET: "1234567890abcdef",
-      // Vazia de propósito: sem ela `registrarWebhook` devolve aviso e não
-      // encosta na rede, o que deixa o teste focado no cache.
       APP_URL_PUBLICA: "",
     });
     vi.resetModules();
@@ -107,14 +107,14 @@ describe("cache da agenda", () => {
 
   beforeEach(() => {
     buscas = 0;
+    atrasoMs = 0;
     vi.stubGlobal("fetch", async (url: string | URL) => {
       const caminho = String(url);
       if (caminho.includes("chat/findContacts")) {
         buscas++;
+        if (atrasoMs > 0) await new Promise((r) => setTimeout(r, atrasoMs));
         return responder(agendaCrua);
       }
-      // O connect precisa devolver QR, senão o pareamento lança antes da hora.
-      if (caminho.includes("instance/connect")) return responder({ base64: "qr-falso" });
       return responder({});
     });
   });
@@ -124,54 +124,44 @@ describe("cache da agenda", () => {
     vi.unstubAllGlobals();
   });
 
-  it("não repete a busca dentro da janela", async () => {
+  it("duas chamadas concorrentes na MESMA instância dividem uma busca só", async () => {
+    const { contatosDaInstancia } = await carregarProvedor();
+    atrasoMs = 20; // dá tempo da segunda chamada colidir antes da primeira responder.
+
+    const [a, b] = await Promise.all([contatosDaInstancia("inst"), contatosDaInstancia("inst")]);
+
+    expect(buscas).toBe(1);
+    expect(a).toEqual(b);
+  });
+
+  it("chamadas concorrentes em instâncias diferentes NÃO se misturam", async () => {
+    const { contatosDaInstancia } = await carregarProvedor();
+    atrasoMs = 20;
+
+    await Promise.all([contatosDaInstancia("inst"), contatosDaInstancia("outra")]);
+
+    expect(buscas).toBe(2);
+  });
+
+  it("chamadas sequenciais buscam de novo, sempre — não há mais janela guardada", async () => {
+    // Esta é a troca deliberada: sem TTL em memória, uma consulta feita 1 s
+    // depois da outra paga o round-trip de novo. É o preço de não haver mais
+    // agenda de terceiro parada na memória entre requisições — e do backend
+    // poder rodar em mais de uma réplica sem uma servir o número da outra.
     const { contatosDaInstancia } = await carregarProvedor();
 
     await contatosDaInstancia("inst");
     await contatosDaInstancia("inst");
 
-    expect(buscas).toBe(1);
-  });
-
-  it("esquece a agenda ao reparear — o número pode ser outro", async () => {
-    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
-
-    await contatosDaInstancia("inst");
-    await provedorEvolution.iniciarSessao(canal, { renovar: true });
-    await contatosDaInstancia("inst");
-
     expect(buscas).toBe(2);
   });
 
-  it("esquece a agenda mesmo num pareamento que não veio de um desconectar", async () => {
-    // A sessão também cai sozinha, pelo webhook ou pelo worker: nesses casos
-    // ninguém chama `encerrarSessao`, e só o pareamento seguinte limpa.
-    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
+  it("esquecerAgenda não lança e não muda o resultado — virou no-op", async () => {
+    const { contatosDaInstancia, esquecerAgenda } = await carregarProvedor();
 
     await contatosDaInstancia("inst");
-    await provedorEvolution.iniciarSessao(canal, {});
+    expect(() => esquecerAgenda("inst")).not.toThrow();
     await contatosDaInstancia("inst");
-
-    expect(buscas).toBe(2);
-  });
-
-  it("esquece a agenda ao desconectar", async () => {
-    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
-
-    await contatosDaInstancia("inst");
-    await provedorEvolution.encerrarSessao(canal);
-    await contatosDaInstancia("inst");
-
-    expect(buscas).toBe(2);
-  });
-
-  it("não derruba o cache de outra instância", async () => {
-    const { contatosDaInstancia, provedorEvolution } = await carregarProvedor();
-
-    await contatosDaInstancia("inst");
-    await contatosDaInstancia("outra");
-    await provedorEvolution.encerrarSessao(canal);
-    await contatosDaInstancia("outra");
 
     expect(buscas).toBe(2);
   });

@@ -558,83 +558,51 @@ export interface ContatoDaAgenda {
  * atualização do gateway devolva uma planilha vazia sem nenhum erro visível.
  */
 /**
- * Cache curto da agenda, por instância.
+ * Deduplicação de requisições EM VOO, por instância — não um cache.
  *
- * A busca custa ~860 ms, quase tudo rede até a VPS da Evolution — o
- * processamento aqui é 130 ms. Como a tela consulta a contagem antes de baixar,
- * sem cache a MESMA agenda era buscada duas vezes em dois segundos.
+ * Nada aqui sobrevive além da própria promessa. A versão anterior guardava a
+ * agenda por cinco minutos, e por causa disso o backend só podia rodar numa
+ * réplica: repare um canal com outro número na réplica A e a réplica B
+ * seguiria entregando a agenda do número anterior — dado pessoal de terceiro
+ * que já não tem nenhuma relação com aquele canal. O comentário desta função
+ * dizia "para escalar, o caminho é derrubar o cache, não movê-lo para o
+ * banco" — persistir no Postgres criaria o cadastro paralelo de contatos que
+ * o sistema inteiro recusa ter (ver `extrairContatos`). A única saída
+ * consistente com essa regra era o cache deixar de existir.
  *
- * Cinco minutos porque agenda de WhatsApp muda devagar, e a extração é um ato
- * pontual: quem acabou de parear vai baixar nos próximos minutos, e quem
- * recarrega a página no meio disso não deveria pagar a busca de novo.
- *
- * SUPÕE UM PROCESSO SÓ DE API, e é a única coisa neste backend que supõe isso.
- * `esquecerAgenda` alcança apenas a memória de quem a chamou: com duas réplicas
- * de web, repare o canal com outro número na réplica A e a réplica B segue
- * entregando a agenda do número anterior até estes cinco minutos passarem.
- * `render.yaml` fixa `numInstances: 1` por causa disto.
- *
- * E o destino natural do estado aqui — o Postgres — é justamente o que este
- * dado não pode ter: a agenda são milhares de telefones de terceiros, e não
- * gravá-los é decisão de produto, não descuido (veja `extrairContatos`).
- * Persistir o cache criaria o cadastro paralelo de contatos que o sistema
- * inteiro recusa ter. Para escalar a API, o caminho é derrubar o cache — não
- * movê-lo para o banco.
+ * O que sobra: como a tela consulta a contagem e depois baixa em sequência
+ * rápida, duas chamadas que colidem no MESMO processo, no mesmo instante,
+ * dividem a mesma promessa em vez de abrir duas conexões à Evolution. Não
+ * ajuda o caso de "consultei há 2 segundos" — esse agora paga a busca de novo,
+ * de propósito, porque pagar ~860 ms por vez é o preço de não guardar agenda
+ * de terceiro na memória entre requisições.
  */
-const CACHE_AGENDA_MS = 5 * 60_000;
-const cacheAgenda = new Map<string, { contatos: ContatoDaAgenda[]; expiraEm: number }>();
+const emVoo = new Map<string, Promise<ContatoDaAgenda[]>>();
 
 export async function contatosDaInstancia(
   instancia: string,
-  /** `true` ignora o cache — usado quando o operador pede explicitamente. */
-  forcar = false,
+  /** Mantido por compatibilidade — não há mais cache para ignorar. */
+  _forcar = false,
 ): Promise<ContatoDaAgenda[]> {
   if (!evolutionConfigurada()) {
     throw new ErroEvolution(SEM_CONFIG, "provedor_nao_configurado");
   }
 
-  const agora = Date.now();
-  const guardado = cacheAgenda.get(instancia);
-  if (!forcar && guardado && guardado.expiraEm > agora) {
-    return guardado.contatos;
-  }
+  const emAndamento = emVoo.get(instancia);
+  if (emAndamento) return emAndamento;
 
+  const promessa = buscarAgendaAgora(instancia).finally(() => emVoo.delete(instancia));
+  emVoo.set(instancia, promessa);
+  return promessa;
+}
+
+async function buscarAgendaAgora(instancia: string): Promise<ContatoDaAgenda[]> {
   const bruto = await chamar<unknown>(CAMINHOS.buscarContatos(instancia), {
     method: "POST",
     body: JSON.stringify({ where: {} }),
   });
 
-  const contatos = mapearAgenda(bruto);
-
-  /*
-   * Varre os vencidos antes de guardar o novo.
-   *
-   * O Map só perdia entrada por sobrescrita ou `esquecerAgenda`, então uma
-   * agenda vencida seguia na memória até alguém ler AQUELA instância de novo —
-   * o que pode nunca acontecer, no canal que o operador parou de usar. O que
-   * incomoda não são os bytes: são milhares de telefones de terceiros parados
-   * num processo que, em todo o resto, não persiste contato em lugar nenhum.
-   *
-   * Aqui e não num timer: `setInterval` seguraria o processo vivo e rodaria
-   * também nos servidores ociosos. A varredura custa uma passada por canal, e
-   * só quando a busca de verdade já foi paga.
-   */
-  for (const [chave, guardada] of cacheAgenda) {
-    if (guardada.expiraEm <= agora) cacheAgenda.delete(chave);
-  }
-
-  /*
-   * Agenda vazia NÃO entra no cache.
-   *
-   * Logo depois do pareamento a Evolution responde lista vazia enquanto o
-   * WhatsApp ainda sincroniza. Guardar esse vazio por cinco minutos
-   * congelaria exatamente o estado que a tela está esperando passar.
-   */
-  if (contatos.length > 0) {
-    cacheAgenda.set(instancia, { contatos, expiraEm: agora + CACHE_AGENDA_MS });
-  }
-
-  return contatos;
+  return mapearAgenda(bruto);
 }
 
 /**
@@ -751,10 +719,15 @@ async function lerAteOLimite(r: Response, limite: number): Promise<Uint8Array | 
   return bytes;
 }
 
-/** Descarta a agenda guardada — o canal saiu, o cache não pode sobreviver a ele. */
-export function esquecerAgenda(instancia: string): void {
-  cacheAgenda.delete(instancia);
-}
+/**
+ * Não faz mais nada — mantida para não obrigar os três call sites a mudar.
+ *
+ * Existia para descartar a agenda de cinco minutos guardada do número
+ * anterior. Sem armazenamento nenhum além da requisição em voo (ver
+ * `contatosDaInstancia`), não há mais o que esquecer: a chamada seguinte já
+ * busca de novo por conta própria, sempre.
+ */
+export function esquecerAgenda(_instancia: string): void {}
 
 /**
  * Transforma a resposta crua da Evolution em contatos exportáveis.

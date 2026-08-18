@@ -35,6 +35,12 @@ envVarGroups:
       # Gere com: openssl rand -hex 32
       - key: EVOLUTION_WEBHOOK_SECRET
         sync: false
+      # Opcional. Webhook de entrada do Slack/Discord/Teams (ou endpoint
+      # próprio) que recebe um POST a cada 500 da API ou crash do worker. Sem
+      # isto os dois só logam no Render — ninguém é avisado fora do horário em
+      # que alguém está olhando. Ver o comentário em `.env.example`.
+      - key: ALERTA_WEBHOOK_URL
+        sync: false
 
 services:
   - type: web
@@ -49,15 +55,17 @@ services:
     startCommand: npm run start:api
     # Rota @Publico(), leve e sem sessão — verifica o banco de passagem.
     healthCheckPath: /api/saude
-    # UMA réplica, de propósito.
-    #
-    # O cache de agenda em `evolution-provider.ts` vive na memória do processo,
-    # e é a única coisa do backend que vive. Com duas réplicas, repare um canal
-    # com outro número numa delas e a outra segue entregando a agenda do número
-    # anterior por até cinco minutos — dado pessoal de quem não tem mais nada a
-    # ver com aquele canal. Antes de subir este número, leia o comentário de
-    # `CACHE_AGENDA_MS`: a saída é remover o cache, não movê-lo para o banco.
-    numInstances: 1
+    # DUAS réplicas — só passou a ser seguro depois que `evolution-provider.ts`
+    # deixou de guardar a agenda em memória por 5 minutos (era a ÚNICA coisa
+    # neste backend que vivia fora do Postgres). Com o cache, réplica A podia
+    # reparear um canal com outro número e a réplica B seguir entregando a
+    # agenda do número anterior — dado pessoal de quem não tinha mais nada a
+    # ver com aquele canal. Hoje `contatosDaInstancia` só deduplica chamada
+    # concorrente DENTRO do mesmo processo; nada sobrevive entre requisições,
+    # em nenhuma réplica. Se `numInstances` voltar a subir mais, confira que
+    # nada novo em `evolution-provider.ts`/`canais.service.ts` reintroduziu
+    # estado de processo antes de continuar escalando.
+    numInstances: 2
     envVars:
       - fromGroup: disparoy-segredos
       - key: NODE_ENV
