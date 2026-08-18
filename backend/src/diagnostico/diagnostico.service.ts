@@ -43,26 +43,41 @@ function numero(v: number | string): number {
 export class DiagnosticoService {
   constructor(private readonly supabase: SupabaseService) {}
 
-  async resumo(dias: number): Promise<Diagnostico> {
+  /**
+   * `empresaId`: `null` é a conta global — vê o sistema inteiro, de propósito.
+   * Qualquer outro admin só pode agregar a própria empresa; sem este
+   * parâmetro as duas RPCs somavam `mensagens_enviadas` inteira e o texto
+   * bruto do erro (que às vezes carrega o telefone do destinatário) vazava
+   * entre empresas.
+   */
+  async resumo(dias: number, empresaId: string | null): Promise<Diagnostico> {
     const desde = new Date(Date.now() - dias * 24 * 60 * 60 * 1000).toISOString();
 
     // Em paralelo: são leituras independentes e a tela mostra as duas juntas.
     const [falhas, amostras] = await Promise.all([
-      this.falhas(desde),
-      this.amostras(desde, null, 30),
+      this.falhas(desde, empresaId),
+      this.amostras(desde, null, 30, empresaId),
     ]);
 
     return { desde, falhas, amostras };
   }
 
   /** Amostras de um código só — usado quando o operador abre uma linha. */
-  async amostrasDoCodigo(dias: number, codigo: string, limite = 30): Promise<AmostraFalha[]> {
+  async amostrasDoCodigo(
+    dias: number,
+    codigo: string,
+    empresaId: string | null,
+    limite = 30,
+  ): Promise<AmostraFalha[]> {
     const desde = new Date(Date.now() - dias * 24 * 60 * 60 * 1000).toISOString();
-    return this.amostras(desde, codigo, limite);
+    return this.amostras(desde, codigo, limite, empresaId);
   }
 
-  private async falhas(desde: string): Promise<ResumoFalha[]> {
-    const { data, error } = await this.supabase.db.rpc("diagnostico_falhas", { p_desde: desde });
+  private async falhas(desde: string, empresaId: string | null): Promise<ResumoFalha[]> {
+    const { data, error } = await this.supabase.db.rpc("diagnostico_falhas", {
+      p_desde: desde,
+      p_empresa_id: empresaId,
+    });
     if (error) throw new Error(`Falha ao agregar diagnóstico: ${error.message}`);
 
     return ((data ?? []) as LinhaResumo[]).map((l) => ({
@@ -80,11 +95,13 @@ export class DiagnosticoService {
     desde: string,
     codigo: string | null,
     limite: number,
+    empresaId: string | null,
   ): Promise<AmostraFalha[]> {
     const { data, error } = await this.supabase.db.rpc("diagnostico_amostras", {
       p_desde: desde,
       p_codigo: codigo,
       p_limite: limite,
+      p_empresa_id: empresaId,
     });
     if (error) throw new Error(`Falha ao listar amostras de erro: ${error.message}`);
 
