@@ -104,6 +104,18 @@ services:
       - fromGroup: disparoy-segredos
       - key: NODE_ENV
         value: production
+      # Mesma URL da API (ex.: https://disparoy-api.onrender.com), não um
+      # endereço do worker — ele não escuta porta nenhuma.
+      #
+      # Faltava aqui, e o worker não subia UMA vez sequer em produção:
+      # `ambiente()` exige esta chave quando NODE_ENV=production, e a exigência
+      # vale para QUALQUER processo que valide o ambiente, não só para a API.
+      # O boot morria em `new SupabaseService`, antes da fila — nenhuma campanha
+      # saía, nenhum pulso era batido, e o único sinal era o incidente que o
+      # vigia abria do outro lado. O worker também precisa dela de fato: ao
+      # reconectar um canal, `registrarWebhook` monta a URL de callback com ela.
+      - key: APP_URL_PUBLICA
+        sync: false
       # Envios simultâneos por canal. Subir demais é convite a bloqueio.
       - key: DISPARO_CONCORRENCIA_POR_CANAL
         value: "1"

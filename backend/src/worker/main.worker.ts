@@ -26,6 +26,17 @@ async function iniciar() {
   const logger = new Logger("Worker");
   const app = await NestFactory.createApplicationContext(WorkerModule, {
     logger: ["log", "warn", "error"],
+    /*
+     * Sem isto o `catch` no fim deste arquivo é decoração.
+     *
+     * O padrão do Nest é `abortOnError: true`, e aí uma falha de inicialização
+     * termina em `process.abort()` DENTRO do framework (`nest-factory.js`):
+     * a promessa nunca rejeita, o processo morre ali, e nenhum alerta sai —
+     * foi assim que um `render.yaml` sem `APP_URL_PUBLICA` derrubou o worker
+     * por três dias em silêncio. Com `false`, o erro volta para quem chamou,
+     * que é quem sabe avisar antes de sair.
+     */
+    abortOnError: false,
   });
   app.enableShutdownHooks();
 
@@ -145,4 +156,43 @@ async function iniciar() {
   });
 }
 
-void iniciar();
+/**
+ * Falha ANTES de o worker existir — boot, na prática.
+ *
+ * Os dois handlers de dentro de `iniciar()` não cobrem nada disto: eles são
+ * registrados no fim da função, e um ambiente inválido ou um Postgres
+ * inalcançável derrubam o processo em `createApplicationContext`, muito antes.
+ * Era um ponto cego real: o worker ficou três dias reiniciando em laço por uma
+ * variável faltando no `render.yaml`, sem que um único alerta saísse — o
+ * incidente veio do vigia do pulso, do outro lado, sem dizer o motivo.
+ *
+ * Isto NÃO substitui o vigia (`VigiaWorkerService`): um SIGKILL continua não
+ * deixando ninguém avisar coisa nenhuma. É o mesmo melhor-esforço dos outros
+ * handlers, cobrindo a janela que faltava — e aqui ele chega com a causa, que
+ * é o que o vigia não tem como saber.
+ */
+iniciar().catch((erro: unknown) => {
+  const logger = new Logger("Worker");
+  logger.error(
+    `O worker não conseguiu iniciar: ${erro instanceof Error ? (erro.stack ?? erro.message) : String(erro)}`,
+  );
+
+  // Instanciado à mão porque o contexto Nest é exatamente o que não existe
+  // aqui. O serviço não tem dependência de construtor — só `fetch` e ambiente.
+  new ObservabilidadeService().relatarErro("Worker — falha ao iniciar", erro);
+
+  /*
+   * Sai com 1 sem cortar o alerta no meio do caminho.
+   *
+   * `exitCode` em vez de `process.exit()` imediato: o `fetch` do alerta segura
+   * o event loop até responder (ou até o timeout de 5 s dele), e só então o
+   * processo termina — com código 1, que é o que faz o Render tratar isto como
+   * deploy quebrado em vez de encerramento limpo. O prazo com `unref` é a
+   * saída para o caso em que a fila deixou conexão aberta e o loop nunca
+   * drenaria sozinho: sem ele, o ponto cego viraria um worker pendurado, que é
+   * pior que um que reinicia.
+   */
+  process.exitCode = 1;
+  const prazo = setTimeout(() => process.exit(1), 6_000);
+  prazo.unref();
+});
