@@ -124,14 +124,17 @@ export class EvolutionService {
 
   private async canalDaInstancia(
     instancia?: string,
-  ): Promise<{ id: string; numero: string | null } | null> {
+  ): Promise<{ id: string; numero: string | null; empresa_id: string | null } | null> {
     if (!instancia) return null;
     const { data } = await this.supabase
       .tabela("canais")
-      .select("id, numero")
+      // `empresa_id` entra aqui porque a instância é a ÚNICA pista de dono que
+      // um evento de webhook carrega: o payload da Evolution não sabe o que é
+      // uma empresa. Quem precisa dele é `contarResposta`.
+      .select("id, numero, empresa_id")
       .eq("instancia_evolution", instancia)
       .maybeSingle();
-    return (data as { id: string; numero: string | null } | null) ?? null;
+    return (data as { id: string; numero: string | null; empresa_id: string | null } | null) ?? null;
   }
 
   private async atualizarConexao(payload: PayloadEvolution): Promise<void> {
@@ -312,7 +315,11 @@ export class EvolutionService {
       payload.data?.message?.extendedTextMessage?.text ??
       "";
 
-    await this.contarResposta(telefone);
+    // A empresa vem da instância que RECEBEU a mensagem. Sem ela, a resposta
+    // era creditada à campanha mais recente que falou com aquele número em
+    // qualquer empresa — ver a migration `20260818000100`.
+    const canal = await this.canalDaInstancia(payload.instance);
+    await this.contarResposta(telefone, canal?.empresa_id ?? null);
 
     if (ehPedidoDeSaida(texto)) {
       const registrado = await this.contatos.registrarOptOut(
@@ -325,7 +332,13 @@ export class EvolutionService {
   }
 
   /**
-   * Credita a resposta à campanha mais recente que falou com este número.
+   * Credita a resposta à campanha mais recente que falou com este número
+   * DENTRO da empresa dona do canal que recebeu a mensagem.
+   *
+   * A empresa passou a viajar até a RPC porque o mesmo telefone pode estar em
+   * campanha de mais de uma — lista comprada, revenda, cliente em comum. Sem
+   * ela, a resposta que chegou pelo canal de um cliente subia a taxa de
+   * resposta exibida no painel de outro.
    *
    * Uma RPC e não SELECT + UPDATE: ler o total e gravar `lido + 1` perde
    * contagem quando duas pessoas respondem ao mesmo tempo — as duas leem o
@@ -334,9 +347,10 @@ export class EvolutionService {
    * não o raro. Dentro da função o incremento é relativo à coluna, então o
    * Postgres serializa e nada se perde.
    */
-  private async contarResposta(telefone: string): Promise<void> {
+  private async contarResposta(telefone: string, empresaId: string | null): Promise<void> {
     const { error } = await this.supabase.db.rpc("registrar_resposta", {
       p_telefone: telefone,
+      p_empresa_id: empresaId,
     });
     if (error) this.logger.warn(`Não foi possível contar a resposta: ${error.message}`);
   }

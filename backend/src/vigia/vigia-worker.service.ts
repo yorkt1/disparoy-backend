@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { FilaService } from "../fila/fila.service";
 import { SupabaseService } from "../supabase/supabase.service";
+import { ObservabilidadeService } from "../observabilidade/observabilidade.service";
 
 /** Fila própria — não reaproveita `manutencao`, que roda DENTRO do worker. */
 const FILA_VIGIA_WORKER = "vigia-worker";
@@ -54,6 +55,7 @@ export class VigiaWorkerService implements OnModuleInit {
   constructor(
     private readonly fila: FilaService,
     private readonly supabase: SupabaseService,
+    private readonly observabilidade: ObservabilidadeService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -100,6 +102,28 @@ export class VigiaWorkerService implements OnModuleInit {
   }
 
   private async abrir(minutosSemPulso: number): Promise<void> {
+    /*
+     * Já existia incidente aberto ANTES desta rodada?
+     *
+     * `abrir_incidente` é upsert: na segunda chamada ele só incrementa
+     * `ocorrencias`, sem dizer se criou ou encontrou. Como o vigia roda de
+     * minuto em minuto, alertar sem esta conferência mandaria um POST por
+     * minuto enquanto o worker estivesse fora — o alerta viraria ruído e o
+     * canal seria silenciado justamente antes do próximo incidente de
+     * verdade.
+     *
+     * A pergunta vai ao BANCO, e não a um campo em memória, porque a API roda
+     * com duas réplicas: o cron entrega o job a uma delas, mas não sempre à
+     * mesma, e um marcador por processo alertaria uma vez por réplica.
+     */
+    const { data: jaAberto } = await this.supabase
+      .tabela("incidentes")
+      .select("id")
+      .eq("codigo", CODIGO)
+      .is("canal_id", null)
+      .is("resolvido_em", null)
+      .maybeSingle();
+
     const { error } = await this.supabase.db.rpc("abrir_incidente", {
       p_categoria: CATEGORIA,
       p_codigo: CODIGO,
@@ -113,6 +137,28 @@ export class VigiaWorkerService implements OnModuleInit {
     // Não relança: o vigia é observabilidade. Se o próprio registro do
     // incidente falhar, o log de erro já é o sinal que sobra.
     if (error) this.logger.error(`Falha ao abrir incidente de worker parado: ${error.message}`);
+
+    /*
+     * O incidente no banco só é visto por quem estiver com o painel aberto, e
+     * worker parado é justamente o evento em que NENHUMA campanha sai — o
+     * cliente descobre pelo silêncio, horas depois.
+     *
+     * Os handlers de `main.worker.ts` não cobrem este caso: eles dependem do
+     * processo ainda estar vivo o bastante para rodar um `fetch`, e não sobra
+     * nada deles num SIGKILL, num OOM ou num travamento. Este alerta sai da
+     * API, de fora, que é o único lugar de onde ele pode sair.
+     *
+     * `relatarErro` não lança, tem timeout próprio e é chamado sem `await`:
+     * um webhook de alerta fora do ar não pode derrubar o vigia nem atrasar a
+     * rodada seguinte.
+     */
+    if (!jaAberto) {
+      this.observabilidade.relatarErro(
+        "Worker de disparo parado",
+        new Error(`Sem pulso há ${Math.round(minutosSemPulso)} min.`),
+        { impacto: "Nenhuma campanha está avançando", minutosSemPulso: Math.round(minutosSemPulso) },
+      );
+    }
   }
 
   private async resolver(): Promise<void> {

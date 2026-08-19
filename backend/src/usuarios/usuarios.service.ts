@@ -115,7 +115,17 @@ export class UsuariosService {
     dados: z.infer<typeof ajusteUsuarioSchema>,
     ip: string,
   ): Promise<Usuario> {
-    const alvo = await this.obter(id);
+    /*
+     * O alvo é carregado NO ESCOPO do autor, não por id solto.
+     *
+     * `obter(id)` não filtra por empresa, e esta rota é `@SomenteAdmin()` —
+     * guard que o admin de CADA empresa também passa. Com o uuid de um perfil
+     * de outra empresa, um admin redefinia a senha dele (`dados.senha` mais
+     * abaixo), desativava ou promovia: tomada de conta entre clientes. Que a
+     * listagem seja escopada e não mostre esse uuid é obscuridade, não
+     * controle de acesso — o id chega pela URL.
+     */
+    const alvo = await this.obterNoEscopo(autor, id);
 
     // Um admin não pode se rebaixar nem se desativar: ficaria trancado para
     // fora da própria conta, e o sistema poderia acabar sem nenhum admin.
@@ -157,9 +167,16 @@ export class UsuariosService {
       },
     });
 
-    return this.obter(id);
+    return this.obterNoEscopo(autor, id);
   }
 
+  /**
+   * Carrega o perfil por id, sem escopo.
+   *
+   * Só para quem JÁ sabe que o id é legítimo — hoje, `criar`, com o id que ela
+   * mesma acabou de inserir. Todo caminho que recebe o id de fora precisa de
+   * `obterNoEscopo`, ou o filtro por empresa some junto.
+   */
   async obter(id: string): Promise<Usuario> {
     const { data, error } = await this.supabase
       .tabela("perfis")
@@ -172,14 +189,62 @@ export class UsuariosService {
     return paraUsuario(data as unknown as LinhaPerfil);
   }
 
-  /** Impede a instalação ficar sem nenhum administrador ativo. */
+  /**
+   * O mesmo, restrito à empresa do autor.
+   *
+   * `COLUNAS_PERFIL` não traz `empresa_id` e não precisa: `noEscopo` filtra na
+   * consulta, e um perfil de outra empresa some do resultado em vez de vir
+   * marcado. Fora do escopo o perfil não existe — daí `NotFoundException` e
+   * não `Forbidden`: dizer "existe, mas não é seu" já confirmaria que aquele
+   * uuid é um usuário de outro cliente.
+   */
+  private async obterNoEscopo(autor: UsuarioAutenticado, id: string): Promise<Usuario> {
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("perfis").select(COLUNAS_PERFIL).eq("id", id),
+      autor,
+    ).maybeSingle();
+
+    if (error) throw new Error(`Falha ao carregar usuário: ${error.message}`);
+    if (!data) throw new NotFoundException("Usuário não encontrado.");
+    return paraUsuario(data as unknown as LinhaPerfil);
+  }
+
+  /**
+   * Impede uma EMPRESA ficar sem nenhum administrador ativo.
+   *
+   * A contagem era global: bastava existir um admin em qualquer outra empresa
+   * — ou a própria conta de administração do sistema, que sempre existe — para
+   * a guarda liberar o rebaixamento do último admin de uma empresa. O cliente
+   * ficava sem ninguém que pudesse criar acesso ou conectar canal, e sem
+   * caminho de volta pelo produto. Quem corre o risco de ficar órfã é a empresa
+   * do ALVO, então é ela que precisa ser contada — e não a do autor: a conta
+   * global de administração, cuja empresa é nula, veria a contagem sem filtro
+   * nenhum e liberaria o rebaixamento pelo mesmo motivo de antes.
+   */
   private async exigirOutroAdminAtivo(excetoId: string): Promise<void> {
-    const { count } = await this.supabase
+    const { data: linhaAlvo } = await this.supabase
+      .tabela("perfis")
+      .select("empresa_id")
+      .eq("id", excetoId)
+      .maybeSingle();
+
+    const empresaDoAlvo = (linhaAlvo as { empresa_id: string | null } | null)?.empresa_id ?? null;
+
+    let consulta = this.supabase
       .tabela("perfis")
       .select("id", { count: "exact", head: true })
       .eq("papel", "admin")
       .eq("ativo", true)
       .neq("id", excetoId);
+
+    // Alvo sem empresa é outra conta global: aí o que não pode acabar são os
+    // administradores DO SISTEMA, que são exatamente os de empresa nula.
+    consulta =
+      empresaDoAlvo === null
+        ? consulta.is("empresa_id", null)
+        : consulta.eq("empresa_id", empresaDoAlvo);
+
+    const { count } = await consulta;
 
     if ((count ?? 0) === 0) {
       throw new BadRequestException(

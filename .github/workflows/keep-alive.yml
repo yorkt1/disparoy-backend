@@ -1,0 +1,44 @@
+# Ping manual na API. NÃO roda em cron, de propósito.
+#
+# O agendamento de 5 em 5 minutos foi removido porque não tinha efeito: no
+# Render só o plano FREE hiberna por inatividade, e `render.yaml` declara
+# `plan: starter` para a API e para o worker. Pingar um serviço que não dorme
+# não compra disponibilidade — só gasta minuto de Actions, polui o log da API e
+# passa a impressão de que existe uma proteção onde não existe.
+#
+# Fica o disparo manual, que é útil para conferir de fora se a API responde
+# depois de um deploy.
+#
+# Se algum dia o plano voltar a Free, a resposta certa não é este workflow (o
+# cron do GitHub atrasa e é desligado sozinho em repositório inativo): é um
+# monitor externo batendo em /api/saude, que já é público e confere o banco.
+#
+# E vale lembrar: nada disto alcança o WORKER. Ele é `type: worker`, não tem
+# porta HTTP, e é quem envia as mensagens. Quem detecta worker parado é o pulso
+# (`VigiaWorkerService` na API, lendo `worker_pulso`), não um ping.
+
+name: Ping manual na API
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    name: Ping API
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # `/api/saude` e não a raiz: a raiz devolve `{"servico":"ok"}` sem tocar
+      # em nada, então responde 200 mesmo com o banco fora. A rota de saúde
+      # consulta o Postgres de passagem, que é o que se quer saber.
+      - name: Conferir se a API responde
+        env:
+          DISPAROY_API_URL: ${{ secrets.DISPAROY_API_URL || 'https://disparoy-api.onrender.com/api/saude' }}
+        # Sem `|| true`: o job precisa FICAR VERMELHO quando a API não responde,
+        # senão a checagem não informa nada. O script sai 1 nesse caso.
+        run: node backend/scripts/keep-alive.mjs

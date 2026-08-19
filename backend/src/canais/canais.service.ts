@@ -93,13 +93,24 @@ export class CanaisService {
 
     const { data, error } = await this.supabase
       .tabela("canal_membros")
-      .select(`canais(${COLUNAS_CANAL})`)
+      // `empresa_id` entra no SELECT só para o filtro abaixo — não vai para
+      // `paraCanal`, que continua recebendo exatamente `COLUNAS_CANAL`.
+      .select(`canais(${COLUNAS_CANAL}, empresa_id)`)
       .eq("perfil_id", usuario.id);
 
     if (error) throw new Error(`Falha ao listar canais: ${error.message}`);
-    return ((data ?? []) as unknown as { canais: LinhaCanal | null }[])
+    return ((data ?? []) as unknown as { canais: (LinhaCanal & { empresa_id: string }) | null }[])
       .map((l) => l.canais)
-      .filter((c): c is LinhaCanal => c !== null)
+      .filter((c): c is LinhaCanal & { empresa_id: string } => c !== null)
+      /*
+       * O vínculo em `canal_membros` sozinho não prova que o canal é da
+       * empresa de quem está olhando: a tabela liga perfil a canal e não
+       * menciona empresa nenhuma. Um vínculo cruzado — plantado pelo furo que
+       * `exigirAcesso` tinha, ou sobrando de um perfil que mudou de empresa —
+       * fazia este caminho devolver canal alheio, com número e foto. O escopo
+       * é o mesmo de `noEscopo`: a conta global vê tudo, o resto vê o seu.
+       */
+      .filter((c) => usuario.empresaId === null || c.empresa_id === usuario.empresaId)
       .map(paraCanal)
       .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
   }
@@ -119,6 +130,34 @@ export class CanaisService {
 
   /** Operador sem vínculo não enxerga nem opera o canal. */
   async exigirAcesso(usuario: UsuarioAutenticado, canalId: string): Promise<void> {
+    /*
+     * A EMPRESA é conferida antes do papel, e não depois.
+     *
+     * `papel === "admin"` não diz nada sobre empresa: cada cliente tem o
+     * próprio admin, e ele administra a empresa DELE. Com o early-return de
+     * admin em primeiro lugar, todo caminho que chama `exigirAcesso` sem
+     * passar por `obter()` — que é escopado — aceitava um `canalId` de outra
+     * empresa: `campanhas.exigirCanaisProntos` deixava criar campanha com o
+     * canal de outro cliente (e o worker dispararia pelo WhatsApp dele),
+     * `vinculos` devolvia as campanhas daquela empresa, `listarMembros` os
+     * nomes dos perfis, e `definirMembro`/`removerMembro` escreviam no canal
+     * alheio. Só a conta global (`empresaId === null`) atravessa, que é o
+     * acesso de suporte — mesma regra de `noEscopo`.
+     */
+    if (usuario.empresaId !== null) {
+      const { data, error } = await this.supabase
+        .tabela("canais")
+        .select("id")
+        .eq("id", canalId)
+        .eq("empresa_id", usuario.empresaId)
+        .maybeSingle();
+
+      // Erro de leitura não pode virar "pode passar": sem resposta do banco,
+      // não sabemos de quem é o canal, e o padrão seguro é recusar.
+      if (error) throw new Error(`Falha ao conferir o canal: ${error.message}`);
+      if (!data) throw new ForbiddenException("Você não tem acesso a este canal.");
+    }
+
     if (usuario.papel === "admin") return;
 
     const { data } = await this.supabase
@@ -713,6 +752,33 @@ export class CanaisService {
     permissao: MembroCanal["permissao"],
   ): Promise<void> {
     await this.exigirAcesso(usuario, canalId);
+
+    /*
+     * O `perfilId` vem do corpo da requisição, então precisa ser conferido.
+     *
+     * `exigirAcesso` acima responde "o AUTOR pode mexer neste canal?" e não diz
+     * nada sobre o alvo. Sem esta checagem, um admin vinculava ao próprio canal
+     * um perfil de OUTRA empresa — bastava o uuid — e entregava a gente de fora
+     * o acesso operacional ao número: extrair a agenda, ver as campanhas, e
+     * (por `listar`) o canal aparecendo na tela dela.
+     *
+     * A conta global escolhe livremente: é ela quem cria os acessos de cada
+     * empresa, mesma regra de `usuarios.criar`.
+     */
+    if (usuario.empresaId !== null) {
+      const { data: alvo, error: erroAlvo } = await this.supabase
+        .tabela("perfis")
+        .select("id")
+        .eq("id", perfilId)
+        .eq("empresa_id", usuario.empresaId)
+        .maybeSingle();
+
+      if (erroAlvo) throw new Error(`Falha ao conferir o operador: ${erroAlvo.message}`);
+      if (!alvo) {
+        throw new ForbiddenException("Este usuário não pertence à sua empresa.");
+      }
+    }
+
     const { error } = await this.supabase
       .tabela("canal_membros")
       .upsert(

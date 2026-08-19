@@ -290,7 +290,7 @@ export class DisparoService {
       }
     }
 
-    const variacoes = await this.variacoes();
+    const variacoes = await this.variacoes(campanha.empresaId);
     let enviados = 0;
     let falha: { codigo: CodigoFalha; detalhe: string } | null = null;
 
@@ -963,8 +963,32 @@ export class DisparoService {
     return { id: l.id, contatoId: l.contato_id, telefone: l.telefone, variaveis };
   }
 
-  private async variacoes(): Promise<Spintax[]> {
-    const { data } = await this.supabase.tabela("spintax").select("id, nome, opcoes, criado_em");
+  /**
+   * Variações da EMPRESA dona da campanha.
+   *
+   * Sem o filtro, esta consulta trazia a tabela `spintax` inteira. O índice
+   * único é `(empresa_id, nome)` justamente porque duas empresas podem ter uma
+   * variação com o mesmo nome — `{{*saudacao*}}` é o nome que todo mundo
+   * escolhe —, e `indexarVariacoes` reduz a lista a um objeto por nome, onde a
+   * última carregada vence. O resultado era a campanha de um cliente sair com
+   * o texto escrito por outro, entregue de verdade ao destinatário: não é
+   * leitura indevida, é conteúdo alheio publicado em nome de quem não o
+   * escreveu.
+   *
+   * `empresa_id` é NOT NULL em `campanhas` e em `spintax` desde a migration
+   * `20260815000600_empresa_obrigatoria`. O `null` aqui é só o caso teórico de
+   * um SELECT em runtime não carregar a coluna — e, nele, nenhuma variação é o
+   * padrão seguro: o texto sai com `{{*nome*}}` literal, visível, em vez de
+   * sair com a frase de outra empresa.
+   */
+  private async variacoes(empresaId: string | null): Promise<Spintax[]> {
+    if (empresaId === null) return [];
+
+    const { data } = await this.supabase
+      .tabela("spintax")
+      .select("id, nome, opcoes, criado_em")
+      .eq("empresa_id", empresaId);
+
     return ((data ?? []) as { id: string; nome: string; opcoes: unknown; criado_em: string }[]).map(
       (l) => ({
         id: l.id,
