@@ -1,1 +1,1 @@
-supabase/migrations/20260818000100_resposta_por_empresa_e_falha_reconciliada.sql
+supabase/migrations/20260817000200_diagnostico_por_empresa.sql
