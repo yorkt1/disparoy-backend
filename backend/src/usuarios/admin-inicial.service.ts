@@ -1,7 +1,7 @@
 import { Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import { SupabaseService } from "../supabase/supabase.service";
 import { ambiente } from "../config/ambiente";
-import { gerarHash } from "../auth/senha";
+import { gerarHash, motivoSenhaFraca } from "../auth/senha";
 
 /**
  * Garante o administrador inicial no boot da API.
@@ -47,6 +47,24 @@ export class AdminInicialService implements OnModuleInit {
     if (existente) {
       await this.promover(existente as { id: string; papel: string; ativo: boolean }, email);
       return;
+    }
+
+    /*
+     * Senha fraca aqui AVISA, não recusa.
+     *
+     * `criar` e `trocarPropriaSenha` recusam, porque ali sempre há alguém do
+     * outro lado para escolher outra. Aqui não há: recusar deixaria a
+     * instalação sem admin nenhum, que é exatamente o estado que este serviço
+     * existe para impedir. E é a conta mais valiosa do sistema, criada a partir
+     * de um `.env` que ninguém relê — o barulho no boot é o que faz o operador
+     * saber que precisa trocá-la pela tela.
+     */
+    const fraca = motivoSenhaFraca(env.ADMIN_SENHA, { email, nome: env.ADMIN_NOME });
+    if (fraca) {
+      this.log.warn(
+        `ADMIN_SENHA é adivinhável (${fraca}) e mesmo assim foi usada para criar ${email}: ` +
+          "sem ela a instalação nasceria sem acesso nenhum. Troque pela tela de perfil agora.",
+      );
     }
 
     const { error } = await this.supabase.tabela("perfis").insert({

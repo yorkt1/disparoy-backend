@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ehPedidoDeSaida, explicar, normalizarTelefone } from "@disparoy/dominio";
 import { SupabaseService } from "../supabase/supabase.service";
+import { ObservabilidadeService } from "../observabilidade/observabilidade.service";
 import { numeroDaInstancia } from "../whatsapp/evolution-provider";
 import { ContatosService } from "../contatos/contatos.service";
 
@@ -58,32 +59,79 @@ export function avancaStatus(atual: string, novo: StatusMensagem): boolean {
   return PROGRESSAO.indexOf(novo) > PROGRESSAO.indexOf(atual as StatusMensagem);
 }
 
+/** O que `registrarEvento` descobriu sobre este payload. */
+export interface EventoRegistrado {
+  /** Linha em `eventos_webhook`, ou `null` se não foi possível gravar. */
+  id: number | null;
+  /** Reentrega de algo que já foi processado com sucesso: não processar de novo. */
+  duplicado: boolean;
+}
+
 @Injectable()
 export class EvolutionService {
   private readonly logger = new Logger(EvolutionService.name);
 
+  /** Último alerta externo, para não inundar o webhook de alerta numa pane. */
+  private alertadoEm = 0;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly contatos: ContatosService,
+    private readonly observabilidade: ObservabilidadeService,
   ) {}
 
-  /** Guarda o payload bruto antes de interpretar — auditoria e depuração. */
-  async registrarEvento(payload: PayloadEvolution): Promise<number | null> {
+  /**
+   * Guarda o payload bruto antes de interpretar — auditoria e depuração — e
+   * decide se este evento já foi processado antes.
+   *
+   * A deduplicação é o próprio índice único: conferir antes com um SELECT
+   * deixaria a janela entre a consulta e o insert aberta, e duas réplicas
+   * recebendo a mesma reentrega ao mesmo tempo é exatamente o caso que precisa
+   * ser coberto.
+   */
+  async registrarEvento(payload: PayloadEvolution): Promise<EventoRegistrado> {
+    const chave = chaveDoEvento(payload);
+
     const { data, error } = await this.supabase
       .tabela("eventos_webhook")
       .insert({
         instancia: payload.instance ?? null,
         evento: payload.event ?? "desconhecido",
         payload: payload as unknown as Record<string, unknown>,
+        chave_evento: chave,
       })
       .select("id")
       .single();
 
+    // 23505: o índice único de `chave_evento` barrou — este evento já chegou.
+    if (error?.code === "23505" && chave) return this.reentrega(chave);
+
     if (error) {
       this.logger.error(`Falha ao gravar evento de webhook: ${error.message}`);
-      return null;
+      return { id: null, duplicado: false };
     }
-    return (data as { id: number }).id;
+    return { id: (data as { id: number }).id, duplicado: false };
+  }
+
+  /**
+   * O evento já existe. Processar de novo ou não depende de como o primeiro
+   * terminou.
+   *
+   * Processado com sucesso: é reentrega pura, e repetir contaria a mesma
+   * resposta do contato duas vezes. Ainda não processado: o processamento
+   * anterior morreu no meio (réplica reiniciada no deploy, exceção), e esta
+   * reentrega é a segunda chance dele — descartá-la perderia o evento em
+   * silêncio, que é o defeito pior dos dois.
+   */
+  private async reentrega(chave: string): Promise<EventoRegistrado> {
+    const { data } = await this.supabase
+      .tabela("eventos_webhook")
+      .select("id, processado")
+      .eq("chave_evento", chave)
+      .maybeSingle();
+
+    const linha = data as { id: number; processado: boolean } | null;
+    return { id: linha?.id ?? null, duplicado: linha?.processado === true };
   }
 
   async processar(payload: PayloadEvolution, eventoId: number | null): Promise<void> {
@@ -109,7 +157,33 @@ export class EvolutionService {
       const motivo = e instanceof Error ? e.message : String(e);
       this.logger.error(`Falha ao processar ${payload.event}: ${motivo}`);
       await this.marcarProcessado(eventoId, motivo);
+      this.alertar(payload, e);
     }
+  }
+
+  /**
+   * Falha de webhook precisa sair do processo.
+   *
+   * O controller responde 200 antes de processar, então o erro não volta para
+   * a Evolution nem para tela nenhuma: ele ficava no `eventos_webhook.erro` e
+   * no stdout do Render, que é o mesmo que dizer "ninguém fica sabendo". E o
+   * que se perde aqui é caro — status de entrega sumindo do relatório e, no
+   * `MESSAGES_UPSERT`, o pedido de saída de alguém que a próxima campanha vai
+   * alcançar de novo.
+   *
+   * Um alerta por minuto no máximo: quando o banco cai, TODO evento falha, e
+   * mandar um POST por evento transformaria a pane numa segunda pane no destino
+   * do alerta. O primeiro já diz o que precisa ser dito.
+   */
+  private alertar(payload: PayloadEvolution, erro: unknown): void {
+    const agora = Date.now();
+    if (agora - this.alertadoEm < 60_000) return;
+    this.alertadoEm = agora;
+
+    this.observabilidade.relatarErro("Webhook da Evolution — evento não processado", erro, {
+      evento: payload.event ?? "desconhecido",
+      instancia: payload.instance ?? "?",
+    });
   }
 
   // ------------------------------------------------------------------------
@@ -354,6 +428,28 @@ export class EvolutionService {
     });
     if (error) this.logger.warn(`Não foi possível contar a resposta: ${error.message}`);
   }
+}
+
+/**
+ * Identidade do evento, para reconhecer a reentrega do mesmo fato.
+ *
+ * O status entra na chave porque a Evolution manda `MESSAGES_UPDATE` várias
+ * vezes para a MESMA mensagem, uma por degrau (`SERVER_ACK`, `DELIVERY_ACK`,
+ * `READ`). Sem ele, a chave seria a mesma nos três e o sistema descartaria a
+ * confirmação de leitura achando que era repetição — trocaria um contador
+ * inflado por um relatório que nunca sai de "entregue".
+ *
+ * `null` quando não há id de mensagem (`CONNECTION_UPDATE`, `QRCODE_UPDATED`):
+ * sem identidade estável não há como distinguir reentrega de fato novo, e
+ * inventar uma chave a partir do payload inteiro descartaria duas desconexões
+ * reais seguidas.
+ */
+function chaveDoEvento(payload: PayloadEvolution): string | null {
+  const idMensagem = payload.data?.key?.id;
+  if (!idMensagem) return null;
+
+  const status = String(payload.data?.status ?? "");
+  return `${payload.instance ?? ""}|${payload.event ?? ""}|${idMensagem}|${status}`;
 }
 
 /** "5511987654321@s.whatsapp.net" -> "+5511987654321". Grupos são ignorados. */

@@ -90,7 +90,12 @@ describe("busca da agenda", () => {
    * estado limpo é módulo novo.
    */
   async function carregarProvedor() {
-    Object.assign(process.env, {
+    // `vi.stubEnv` e não `Object.assign(process.env, ...)`: o `process.env` é do
+    // processo, e o vitest reaproveita worker entre arquivos. Escrito na mão,
+    // este ambiente sobrevive ao arquivo e o próximo a rodar herda um
+    // `EVOLUTION_API_URL` que ele não configurou. Só o que passa por `stubEnv`
+    // é desfeito pelo `unstubAllEnvs` do `afterEach`.
+    for (const [chave, valor] of Object.entries({
       NODE_ENV: "development",
       SUPABASE_URL: "https://example.supabase.co",
       SUPABASE_SERVICE_ROLE_KEY: "super-secret-service-role-key-123456",
@@ -100,7 +105,9 @@ describe("busca da agenda", () => {
       EVOLUTION_API_KEY: "chave-de-teste",
       EVOLUTION_WEBHOOK_SECRET: "1234567890abcdef",
       APP_URL_PUBLICA: "",
-    });
+    })) {
+      vi.stubEnv(chave, valor);
+    }
     vi.resetModules();
     return import("./evolution-provider.js");
   }
@@ -122,6 +129,7 @@ describe("busca da agenda", () => {
   afterEach(() => {
     vi.resetModules();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("duas chamadas concorrentes na MESMA instância dividem uma busca só", async () => {

@@ -23,7 +23,9 @@ describe("fotoDaInstancia", () => {
     new Response(new Blob([bytes]), { status: 200, headers: { "content-type": "image/jpeg" } });
 
   async function carregarProvedor() {
-    Object.assign(process.env, {
+    // Ver `agenda.test.ts`: `process.env` escrito na mão vaza para o arquivo
+    // seguinte no mesmo worker; `stubEnv` é o que o `unstubAllEnvs` desfaz.
+    for (const [chave, valor] of Object.entries({
       NODE_ENV: "development",
       SUPABASE_URL: "https://example.supabase.co",
       SUPABASE_SERVICE_ROLE_KEY: "super-secret-service-role-key-123456",
@@ -33,7 +35,9 @@ describe("fotoDaInstancia", () => {
       EVOLUTION_API_KEY: "chave-de-teste",
       EVOLUTION_WEBHOOK_SECRET: "1234567890abcdef",
       APP_URL_PUBLICA: "",
-    });
+    })) {
+      vi.stubEnv(chave, valor);
+    }
     vi.resetModules();
     return import("./evolution-provider.js");
   }
@@ -57,6 +61,7 @@ describe("fotoDaInstancia", () => {
   afterEach(() => {
     vi.resetModules();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("aceita o domínio de mídia do WhatsApp", async () => {

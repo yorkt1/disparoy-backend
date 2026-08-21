@@ -25,8 +25,16 @@ const envBase = {
   DISPARO_CONCORRENCIA_POR_CANAL: "1",
 };
 
+/**
+ * `vi.stubEnv` e não `Object.assign(process.env, ...)`: o `unstubAllEnvs` do
+ * `afterEach` abaixo só desfaz o que foi stubado. Atribuição na mão sobrevive
+ * ao arquivo e entrega ao próximo um ambiente válido de brinde — inclusive o
+ * par `ADMIN_EMAIL`/`ADMIN_SENHA`, que muda o resultado da validação.
+ */
 const setEnv = (origens: string) => {
-  Object.assign(process.env, envBase, { ORIGENS_PERMITIDAS: origens });
+  for (const [chave, valor] of Object.entries({ ...envBase, ORIGENS_PERMITIDAS: origens })) {
+    vi.stubEnv(chave, valor);
+  }
 };
 
 afterEach(() => {

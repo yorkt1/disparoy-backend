@@ -6,7 +6,7 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { COLUNAS_PERFIL, paraUsuario, type LinhaPerfil } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
-import { gerarHash } from "../auth/senha";
+import { gerarHash, motivoSenhaFraca } from "../auth/senha";
 import { noEscopo } from "../comum/escopo";
 
 @Injectable()
@@ -48,6 +48,13 @@ export class UsuariosService {
     ip: string,
   ): Promise<Usuario> {
     const email = dados.email.trim().toLowerCase();
+
+    // `senhaSchema` só mede comprimento, e o mínimo dele é 6: `123456` passava
+    // e virava a senha definitiva de um acesso que enxerga a base inteira de
+    // contatos. O teto de tentativas do login atrasa a força bruta, não a
+    // impede.
+    const fraca = motivoSenhaFraca(dados.senha, { email, nome: dados.nome });
+    if (fraca) throw new BadRequestException(fraca);
 
     /*
      * A qual empresa o novo acesso pertence.
@@ -135,6 +142,29 @@ export class UsuariosService {
 
     if (alvo.papel === "admin" && (dados.papel === "operator" || dados.ativo === false)) {
       await this.exigirOutroAdminAtivo(id);
+    }
+
+    if (dados.senha !== undefined) {
+      /*
+       * Redefinir a PRÓPRIA senha não passa por aqui.
+       *
+       * `trocarPropriaSenha` exige a senha atual de propósito, e o comentário
+       * dela diz por quê: o token vive 12 h no `localStorage`, e quem senta na
+       * máquina destravada de um admin — ou rouba o token por XSS — não pode
+       * transformar acesso temporário em posse definitiva da conta. Esta rota
+       * é `@SomenteAdmin()` e aceitava `:id` igual ao do autor, o que dava
+       * exatamente esse atalho: mesmo efeito, sem conferir nada. Quem esqueceu
+       * a própria senha continua tendo caminho — outro admin redefine, ou
+       * `npm run redefinir-senha` no Shell do serviço.
+       */
+      if (autor.id === id) {
+        throw new BadRequestException(
+          "Para trocar a sua própria senha, use a tela de perfil — a senha atual é exigida.",
+        );
+      }
+
+      const fraca = motivoSenhaFraca(dados.senha, { email: alvo.email, nome: alvo.nome });
+      if (fraca) throw new BadRequestException(fraca);
     }
 
     // Sem e-mail de recuperação, é por aqui que alguém que esqueceu a senha

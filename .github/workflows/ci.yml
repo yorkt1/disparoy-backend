@@ -52,6 +52,23 @@ jobs:
       - name: Testes
         run: npm test
 
+      # `npm audit` cru não serve de portão aqui: o xlsx tem dois avisos altos
+      # sem correção publicada no npm, então o comando reprovaria todo commit —
+      # e passo que sempre falha é passo que todo mundo aprende a ignorar. O
+      # script carrega a lista de exceções com motivo e data, e reprova
+      # qualquer aviso alto fora dela.
+      - name: Auditoria de dependências
+        run: node scripts/auditoria-dependencias.mjs
+
+      # `shared/` é copiado byte a byte entre os dois repositórios, e o processo
+      # para manter isso era "lembre de copiar e rodar diff -rq". Divergência
+      # aqui produz o pior tipo de bug: normalizar um telefone passa a dar
+      # resultado diferente na API e no painel, os dois compilam, os dois passam
+      # nos testes, e a diferença só aparece em produção. O CI clona um repo só,
+      # então a conferência é contra o hash versionado nos dois.
+      - name: shared/ não divergiu do outro repositório
+        run: npm run compartilhado:verificar
+
       # Rede de segurança boba e barata: um `.env` versionado entrega a
       # service role do Supabase, que ignora RLS e abre o banco inteiro.
       - name: Nenhum segredo versionado

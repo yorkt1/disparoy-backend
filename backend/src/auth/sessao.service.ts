@@ -1,11 +1,18 @@
-import { BadRequestException, Injectable, UnauthorizedException } from "@nestjs/common";
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { SignJWT } from "jose";
 import type { Papel, Usuario } from "@disparoy/dominio";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
+import { FreioService } from "../comum/freio.service";
 import { ambiente, segredoJwt } from "../config/ambiente";
 import { COLUNAS_PERFIL, paraUsuario, type LinhaPerfil } from "../comum/mapeadores";
-import { conferirSenha, gerarHash } from "./senha";
+import { conferirSenha, gerarHash, motivoSenhaFraca } from "./senha";
 import type { UsuarioAutenticado } from "./auth.guard";
 
 export interface SessaoCriada {
@@ -27,10 +34,36 @@ export class SessaoService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly auditoria: AuditoriaService,
+    private readonly freio: FreioService,
   ) {}
 
   async entrar(email: string, senha: string, ip: string): Promise<SessaoCriada> {
     const alvo = email.trim().toLowerCase();
+
+    /**
+     * A conta trancada é recusada antes de qualquer consulta.
+     *
+     * O teto por IP do `sessao.controller.ts` não cobre o ataque que importa
+     * aqui: uma lista de senhas comuns disparada contra UMA conta, a partir de
+     * muitos IPs, nunca estoura o limite de nenhum deles. Este freio conta por
+     * CONTA, e é o que transforma "senha fraca de operador" em algo que leva
+     * meses em vez de minutos.
+     *
+     * Dizer que está bloqueado — em vez de repetir "e-mail ou senha inválidos"
+     * — não entrega quais e-mails existem: `chaveDeLogin` conta o endereço
+     * TENTADO, cadastrado ou não, então um e-mail inexistente tranca igual. E
+     * quem está só errando a própria senha precisa entender por que parou de
+     * funcionar, senão vira chamado.
+     */
+    const bloqueadoPor = await this.freio.loginBloqueadoPor(alvo);
+    if (bloqueadoPor > 0) {
+      const minutos = Math.max(1, Math.ceil(bloqueadoPor / 60));
+      throw new HttpException(
+        `Tentativas demais nesta conta. Tente de novo em ${minutos} ` +
+          `${minutos === 1 ? "minuto" : "minutos"}.`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
 
     const { data, error } = await this.supabase
       .tabela("perfis")
@@ -42,16 +75,28 @@ export class SessaoService {
 
     const linha = data as (LinhaPerfil & { senha_hash: string | null }) | null;
 
-    // A senha é conferida mesmo quando o e-mail não existe, contra um hash
-    // descartável: responder na hora para e-mail inexistente revelaria, pelo
-    // tempo, quais endereços estão cadastrados.
+    // A senha é conferida ANTES de olhar `linha` e ANTES de olhar `ativo`, e
+    // `conferirSenha` deriva scrypt mesmo recebendo `null` — é o que faz os
+    // três caminhos de recusa custarem o mesmo. Sair mais cedo em qualquer um
+    // deles devolveria a resposta em microssegundos contra os ~100 ms de um
+    // e-mail cadastrado, e o login viraria um oráculo de quais endereços estão
+    // na base, sem precisar acertar senha nenhuma.
     const confere = await conferirSenha(senha, linha?.senha_hash ?? null);
 
     // Mensagem única para e-mail errado, senha errada e perfil desativado.
     // Detalhar qual dos três falhou entrega meio login para quem está tentando.
     if (!linha || !confere || !linha.ativo) {
+      // Conta a tentativa DEPOIS de recusar, e para os três casos: contar só o
+      // e-mail existente faria a conta trancar apenas quando o endereço está na
+      // base, e a diferença entre trancar e não trancar viraria o oráculo de
+      // existência que a mensagem única evita.
+      await this.freio.registrarFalhaDeLogin(alvo);
       throw new UnauthorizedException("E-mail ou senha inválidos.");
     }
+
+    // Acertou: o histórico de falhas some. Sem isto, nove erros de digitação
+    // espalhados pela semana deixariam a conta a uma tentativa de trancar.
+    await this.freio.limparFalhasDeLogin(alvo);
 
     const usuario = paraUsuario(linha);
     const { token, expiraEm } = await this.assinar(usuario.id, usuario.papel);
@@ -97,6 +142,9 @@ export class SessaoService {
     if (senhaAtual === novaSenha) {
       throw new BadRequestException("A nova senha precisa ser diferente da atual.");
     }
+
+    const fraca = motivoSenhaFraca(novaSenha, { email: usuario.email, nome: usuario.nome });
+    if (fraca) throw new BadRequestException(fraca);
 
     const { data, error } = await this.supabase
       .tabela("perfis")

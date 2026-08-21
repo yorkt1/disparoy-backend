@@ -58,11 +58,19 @@ export class EvolutionController {
   ) {
     this.exigirSegredo(autorizacao, segredoHeader);
 
-    const eventoId = await this.evolution.registrarEvento(payload);
+    const registro = await this.evolution.registrarEvento(payload);
+
+    /**
+     * Reentrega do que já foi processado para aqui.
+     *
+     * Responde 200 do mesmo jeito: para a Evolution o evento foi aceito, e um
+     * status de erro só faria ela reenviar de novo o que já está gravado.
+     */
+    if (registro.duplicado) return { recebido: true };
 
     // Responde já e processa depois: a Evolution reenvia o evento se demorar,
     // e um webhook lento vira tempestade de duplicatas.
-    void this.evolution.processar(payload, eventoId).catch((e: unknown) => {
+    void this.evolution.processar(payload, registro.id).catch((e: unknown) => {
       this.logger.error(`Processamento assíncrono falhou: ${String(e)}`);
     });
 

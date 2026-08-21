@@ -476,6 +476,30 @@ export class DisparoService {
     await this.concluirOrfas();
     await this.limparEventosAntigos();
     await this.limparAvisosAntigos();
+    await this.limparFreiosExpirados();
+  }
+
+  /**
+   * Contadores de rate limit que já viraram pó.
+   *
+   * `freios` recebe uma linha por chave freada — inclusive do login, que é
+   * público: qualquer um na internet faz a tabela crescer. As linhas param de
+   * ser consultadas assim que a janela passa, mas nada as apaga, e uma tabela
+   * que só cresce acaba deixando lento o próprio caminho que ela protege.
+   *
+   * Cai aqui e não num cron próprio porque `manutencao()` já é o lugar onde a
+   * limpeza periódica mora, e um segundo agendador seria mais uma peça para
+   * alguém esquecer de ligar num deploy novo.
+   */
+  private async limparFreiosExpirados(): Promise<void> {
+    const { data, error } = await this.supabase.db.rpc("limpar_freios_expirados");
+    if (error) {
+      this.logger.error(`Limpeza de freios falhou: ${error.message}`);
+      return;
+    }
+    if (typeof data === "number" && data > 0) {
+      this.logger.log(`${data} contador(es) de freio expirados removidos.`);
+    }
   }
 
   /**

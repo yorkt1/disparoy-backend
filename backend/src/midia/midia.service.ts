@@ -5,6 +5,7 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { ambiente } from "../config/ambiente";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
+import { conferirConteudo, nomeExibivel } from "./assinatura";
 
 /** Bucket público criado para as mídias das campanhas. */
 export const BUCKET_MIDIA = "midia";
@@ -58,20 +59,31 @@ export class MidiaService {
       );
     }
 
-    // O mime declarado pelo navegador não decide nada sozinho — é conferido
-    // contra a extensão, que é o que define o `mediatype` no envio.
-    if (arquivo.mimetype && !(regra.mimes as readonly string[]).includes(arquivo.mimetype)) {
-      throw new BadRequestException(
-        `O conteúdo do arquivo (${arquivo.mimetype}) não bate com a extensão ${extensao}.`,
-      );
-    }
+    /*
+     * Quem decide é o conteúdo, não o cabeçalho.
+     *
+     * A conferência anterior comparava `arquivo.mimetype` — o `Content-Type`
+     * que o próprio cliente escreveu na parte do multipart — com a lista da
+     * extensão. Duas strings do mesmo remetente concordando entre si não provam
+     * nada, e o `if (arquivo.mimetype)` ainda deixava a checagem inteira ser
+     * pulada mandando a parte sem tipo declarado. Como o bucket é público e a
+     * URL é permanente, o que passasse por aqui viraria arquivo hospedado
+     * indefinidamente no domínio do projeto.
+     *
+     * O mime devolvido é derivado da EXTENSÃO já validada, e é ele que vai para
+     * o Storage: gravar o do cliente deixaria quem sobe o arquivo escolher como
+     * o navegador de terceiros vai interpretá-lo depois.
+     */
+    const veredito = conferirConteudo(arquivo.buffer, extensao);
+    if (!veredito.ok) throw new BadRequestException(veredito.motivo);
 
+    const nomeArquivo = nomeExibivel(arquivo.originalname, extensao);
     const caminho = `campanhas/${randomUUID()}${extensao}`;
 
     const { error } = await this.supabase.db.storage
       .from(BUCKET_MIDIA)
       .upload(caminho, arquivo.buffer, {
-        contentType: arquivo.mimetype || undefined,
+        contentType: veredito.mime,
         // Caminho é uuid: colisão significaria bug, não sobrescrita legítima.
         upsert: false,
       });
@@ -86,11 +98,11 @@ export class MidiaService {
       acao: "midia.upload",
       tipoEntidade: "midia",
       entidadeId: caminho,
-      entidadeRotulo: arquivo.originalname,
+      entidadeRotulo: nomeArquivo,
       ip,
-      detalhes: { tipo, tamanho: arquivo.size },
+      detalhes: { tipo, tamanho: arquivo.size, mime: veredito.mime },
     });
 
-    return { url, tipo, nomeArquivo: arquivo.originalname, tamanho: arquivo.size };
+    return { url, tipo, nomeArquivo, tamanho: arquivo.size };
   }
 }
