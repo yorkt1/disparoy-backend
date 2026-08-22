@@ -70,7 +70,24 @@ export class VigiaWorkerService implements OnModuleInit {
       await this.verificar();
     });
 
-    this.logger.log("Vigia do pulso do worker ativo.");
+    /*
+     * O estado do alerta é dito no BOOT, não só na hora do incidente.
+     *
+     * Sem `ALERTA_WEBHOOK_URL`, a queda do worker fica registrada apenas no
+     * banco — e o painel só é visto por quem estiver com ele aberto, que é
+     * justamente o que não acontece às 3h da manhã. Descobrir isso no momento
+     * do incidente é tarde demais: a hora de saber que o alerta não existe é
+     * enquanto está tudo bem.
+     */
+    if (this.observabilidade.alertaExternoConfigurado()) {
+      this.logger.log("Vigia do pulso do worker ativo, com alerta externo configurado.");
+    } else {
+      this.logger.error(
+        "Vigia do pulso do worker ativo, mas SEM alerta externo: ALERTA_WEBHOOK_URL " +
+          "não está configurada. Se o worker parar, o incidente será aberto no banco e " +
+          "mais nada — nenhuma notificação sai daqui.",
+      );
+    }
   }
 
   private async verificar(): Promise<void> {
@@ -102,41 +119,70 @@ export class VigiaWorkerService implements OnModuleInit {
   }
 
   private async abrir(minutosSemPulso: number): Promise<void> {
-    /*
-     * Já existia incidente aberto ANTES desta rodada?
-     *
-     * `abrir_incidente` é upsert: na segunda chamada ele só incrementa
-     * `ocorrencias`, sem dizer se criou ou encontrou. Como o vigia roda de
-     * minuto em minuto, alertar sem esta conferência mandaria um POST por
-     * minuto enquanto o worker estivesse fora — o alerta viraria ruído e o
-     * canal seria silenciado justamente antes do próximo incidente de
-     * verdade.
-     *
-     * A pergunta vai ao BANCO, e não a um campo em memória, porque a API roda
-     * com duas réplicas: o cron entrega o job a uma delas, mas não sempre à
-     * mesma, e um marcador por processo alertaria uma vez por réplica.
-     */
-    const { data: jaAberto } = await this.supabase
-      .tabela("incidentes")
-      .select("id")
-      .eq("codigo", CODIGO)
-      .is("canal_id", null)
-      .is("resolvido_em", null)
-      .maybeSingle();
+    const arredondado = Math.round(minutosSemPulso);
 
-    const { error } = await this.supabase.db.rpc("abrir_incidente", {
+    const { data: id, error } = await this.supabase.db.rpc("abrir_incidente", {
       p_categoria: CATEGORIA,
       p_codigo: CODIGO,
       p_titulo: "O worker de disparo parou de responder",
       p_canal_id: null,
       p_campanha_id: null,
       p_detalhe:
-        `Sem pulso há ${Math.round(minutosSemPulso)} min. Nenhuma campanha está avançando ` +
+        `Sem pulso há ${arredondado} min. Nenhuma campanha está avançando ` +
         `enquanto isto durar — não é falha de canal nem de destinatário.`,
     });
+
     // Não relança: o vigia é observabilidade. Se o próprio registro do
     // incidente falhar, o log de erro já é o sinal que sobra.
-    if (error) this.logger.error(`Falha ao abrir incidente de worker parado: ${error.message}`);
+    if (error) {
+      this.logger.error(`Falha ao abrir incidente de worker parado: ${error.message}`);
+      return;
+    }
+
+    const incidenteId = typeof id === "number" ? id : Number(id);
+    if (!Number.isFinite(incidenteId)) {
+      this.logger.error("abrir_incidente não devolveu um id; alerta externo não foi tentado.");
+      return;
+    }
+
+    await this.alertar(incidenteId, arredondado);
+  }
+
+  /**
+   * Manda o alerta externo — no máximo uma vez por incidente, e registra o
+   * desfecho.
+   *
+   * O que havia antes era um `select ... where resolvido_em is null` feito
+   * ANTES de `abrir_incidente`: se já existia incidente aberto, não alertava.
+   * Isso resolvia o spam (o vigia roda de minuto em minuto) e criava dois
+   * buracos:
+   *
+   *  - POST que falha nunca é tentado de novo. Na rodada seguinte o incidente
+   *    "já existia", e o único aviso externo se perdeu no primeiro timeout;
+   *  - leitura seguida de escrita, com as duas réplicas da API no meio: as
+   *    duas podiam ler "não existe" e alertar.
+   *
+   * `reivindicar_alerta_incidente` faz as duas coisas de uma vez: é um
+   * `update ... where alertado_em is null returning`, atômico, e quem perde a
+   * corrida simplesmente não alerta. Quando o envio falha,
+   * `registrar_alerta_incidente('falhou')` devolve a reivindicação e a rodada
+   * seguinte tenta outra vez.
+   *
+   * Alerta NOVO depois de o worker voltar e cair de novo continua saindo: o
+   * incidente antigo é fechado por `resolver()`, e `abrir_incidente` cria uma
+   * linha nova, com `alertado_em` nulo.
+   */
+  private async alertar(incidenteId: number, minutosSemPulso: number): Promise<void> {
+    const { data: reivindicado, error } = await this.supabase.db.rpc(
+      "reivindicar_alerta_incidente",
+      { p_id: incidenteId },
+    );
+
+    if (error) {
+      this.logger.error(`Falha ao reivindicar o alerta do incidente: ${error.message}`);
+      return;
+    }
+    if (reivindicado !== true) return;
 
     /*
      * O incidente no banco só é visto por quem estiver com o painel aberto, e
@@ -147,16 +193,33 @@ export class VigiaWorkerService implements OnModuleInit {
      * processo ainda estar vivo o bastante para rodar um `fetch`, e não sobra
      * nada deles num SIGKILL, num OOM ou num travamento. Este alerta sai da
      * API, de fora, que é o único lugar de onde ele pode sair.
-     *
-     * `relatarErro` não lança, tem timeout próprio e é chamado sem `await`:
-     * um webhook de alerta fora do ar não pode derrubar o vigia nem atrasar a
-     * rodada seguinte.
      */
-    if (!jaAberto) {
-      this.observabilidade.relatarErro(
-        "Worker de disparo parado",
-        new Error(`Sem pulso há ${Math.round(minutosSemPulso)} min.`),
-        { impacto: "Nenhuma campanha está avançando", minutosSemPulso: Math.round(minutosSemPulso) },
+    const resultado = await this.observabilidade.enviarAlerta(
+      "Worker de disparo parado",
+      new Error(`Sem pulso há ${minutosSemPulso} min.`),
+      { impacto: "Nenhuma campanha está avançando", minutosSemPulso },
+    );
+
+    const { error: erroRegistro } = await this.supabase.db.rpc("registrar_alerta_incidente", {
+      p_id: incidenteId,
+      p_estado: resultado,
+    });
+    if (erroRegistro) {
+      this.logger.error(`Falha ao registrar o desfecho do alerta: ${erroRegistro.message}`);
+    }
+
+    if (resultado === "desabilitado") {
+      // O incidente fica gravado com `alerta_estado = 'desabilitado'`. Dizer
+      // isso em voz alta é o ponto: o sistema NÃO finge ter alertado.
+      this.logger.error(
+        `Worker parado há ${minutosSemPulso} min e nenhum alerta externo foi enviado — ` +
+          `ALERTA_WEBHOOK_URL não está configurada. O incidente ${incidenteId} está aberto ` +
+          `no banco e é a única evidência.`,
+      );
+    } else if (resultado === "falhou") {
+      this.logger.error(
+        `Worker parado há ${minutosSemPulso} min e o alerta externo não saiu. ` +
+          `A próxima rodada do vigia tenta de novo (incidente ${incidenteId}).`,
       );
     }
   }

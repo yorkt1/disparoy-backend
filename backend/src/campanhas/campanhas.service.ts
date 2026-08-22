@@ -23,6 +23,7 @@ import {
 } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { empresaParaEscrita, noEscopo } from "../comum/escopo";
+import { LimitesService } from "../comum/limites.service";
 
 export interface ConsultaCampanhas {
   pagina?: number;
@@ -38,6 +39,7 @@ export class CampanhasService {
     private readonly auditoria: AuditoriaService,
     private readonly canais: CanaisService,
     private readonly fila: FilaService,
+    private readonly limites: LimitesService,
   ) {}
 
   // ------------------------------------------------------------------------
@@ -200,6 +202,23 @@ export class CampanhasService {
     const status: StatusCampanha =
       dados.acao === "rascunho" ? "rascunho" : dados.agendadaPara ? "agendada" : "em_andamento";
 
+    /*
+     * Teto de campanhas simultâneas — antes de gravar qualquer coisa.
+     *
+     * Rascunho não conta e não é barrado: ele não ocupa fila nenhuma, e
+     * impedir alguém de ESCREVER a próxima campanha porque as três atuais
+     * ainda rodam seria transformar uma proteção de capacidade em obstáculo de
+     * trabalho.
+     *
+     * `usuario.empresaId` e não `empresaParaEscrita`: a conta global cai no
+     * `empresaParaEscrita` do INSERT logo abaixo, com a mensagem própria dele
+     * ("entre com o acesso da empresa"). Antecipá-la aqui só trocaria uma
+     * mensagem clara por outra igual, mais cedo.
+     */
+    if (status !== "rascunho" && usuario.empresaId !== null) {
+      await this.limites.exigirEspacoParaCampanha(usuario.empresaId);
+    }
+
     const { data, error } = await this.supabase
       .tabela("campanhas")
       .insert({
@@ -318,6 +337,17 @@ export class CampanhasService {
 
     await this.supabase.tabela("campanhas").update({ status: "pausada" }).eq("id", id);
 
+    /*
+     * Zera as marcas de agendamento junto com a pausa.
+     *
+     * `fila_ate` aponta para o fim da fila que `invalidar_rodada_campanha`
+     * acabou de aposentar — horas à frente numa campanha grande. Sem limpar,
+     * retomar agendaria o primeiro contato para o horário em que a execução
+     * anterior TERIA terminado, e o operador clicaria em "retomar" sem ver
+     * nada acontecer pelo resto do dia.
+     */
+    await this.supabase.db.rpc("limpar_agendamento_da_campanha", { p_campanha_id: id });
+
     await this.auditoria.registrar({
       usuarioId: usuario.id,
       usuarioNome: usuario.nome,
@@ -348,6 +378,24 @@ export class CampanhasService {
       throw new ConflictException("Só é possível retomar campanha pausada ou em rascunho.");
     }
     await this.exigirCanaisProntos(usuario, campanha.canaisIds);
+
+    /*
+     * Retomar ocupa uma vaga de campanha simultânea igual a criar: uma
+     * campanha em rascunho retomada é trabalho novo na fila compartilhada.
+     *
+     * `usuario.empresaId` direto, e NÃO `empresaParaEscrita`: aquela função
+     * LANÇA para a conta global, e a conta global sempre pôde retomar campanha
+     * de qualquer cliente — é o acesso de suporte. Trocar por ela transformaria
+     * "conferir um limite" em "tirar o suporte do ar", que é um estrago maior
+     * que o limite evita.
+     */
+    if (usuario.empresaId !== null) {
+      await this.limites.exigirEspacoParaCampanha(usuario.empresaId);
+    }
+
+    // Ver o comentário em `pausar`: a fila anterior foi aposentada e
+    // `fila_ate` não pode continuar apontando para o fim dela.
+    await this.supabase.db.rpc("limpar_agendamento_da_campanha", { p_campanha_id: id });
 
     await this.supabase
       .tabela("campanhas")

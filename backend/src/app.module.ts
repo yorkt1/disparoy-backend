@@ -7,6 +7,7 @@ import { AuthModule } from "./auth/auth.module";
 import { ArmazenamentoDeFreio } from "./comum/freio-armazenamento";
 import { FreioModule } from "./comum/freio.module";
 import { FreioService } from "./comum/freio.service";
+import { LimitesModule } from "./comum/limites.module";
 import { SupabaseModule } from "./supabase/supabase.module";
 import { AuditoriaModule } from "./auditoria/auditoria.module";
 import { WhatsappModule } from "./whatsapp/whatsapp.module";
@@ -57,6 +58,9 @@ const FREIOS_GLOBAIS = [
     ObservabilidadeModule,
     SupabaseModule,
     FreioModule,
+    // Teto de canais e de campanhas simultâneas por empresa, conferido antes
+    // de aceitar a criação. A cota diária de mensagens é do worker.
+    LimitesModule,
     ThrottlerModule.forRootAsync({
       inject: [FreioService],
       useFactory: (freio: FreioService) => ({

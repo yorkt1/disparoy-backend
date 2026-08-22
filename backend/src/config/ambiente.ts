@@ -121,7 +121,30 @@ const schema = z.object({
   META_WHATSAPP_BUSINESS_ACCOUNT_ID: z.string().optional(),
   META_GRAPH_API_VERSION: z.string().default("v21.0"),
 
-  /** Envios simultâneos por canal. Subir demais é convite a bloqueio. */
+  /**
+   * Quantos jobs de contato o worker tira da fila por rodada.
+   *
+   * O NOME MENTE, e mudá-lo agora quebraria o `render.yaml` e todo `.env` que
+   * já existe — então fica o aviso: isto NÃO é "por canal". O valor vira o
+   * `batchSize` da fila `disparo-contato` em `main.worker.ts`, que é GLOBAL:
+   * vale para todos os canais, todas as campanhas e todas as empresas
+   * somados. Com o padrão `1`, o worker processa um contato por vez no sistema
+   * inteiro.
+   *
+   * Não há nada que distribua a concorrência entre canais ou entre clientes —
+   * a fila é uma só e o pg-boss entrega por ordem de `startAfter`. O que
+   * impede um cliente de monopolizar a fila é o teto de contatos por
+   * planejamento e a cota diária por empresa (`comum/limites-empresa.ts`), não
+   * este número.
+   *
+   * SUBIR ISTO SEM ESTUDAR NÃO ACELERA E PODE CUSTAR CARO: o handler percorre
+   * o lote com `await` sequencial, então o paralelismo real continua sendo 1 —
+   * só sai mais job da fila por rodada. Trocar o laço por `Promise.all` para
+   * ganhar vazão de verdade faria vários contatos saírem no MESMO instante,
+   * anulando o `startAfter` sorteado de cada job — e cadência simultânea é um
+   * dos dois padrões que mais pesam no risco de bloqueio do número (o outro é
+   * cadência fixa, que os intervalos aleatórios já tratam).
+   */
   DISPARO_CONCORRENCIA_POR_CANAL: z.coerce.number().int().min(1).max(20).default(1),
 
   // --- Observabilidade externa (opcional) ---------------------------------
@@ -139,6 +162,16 @@ const schema = z.object({
    * Sem isto configurado, os erros continuam só no log do Render — o que
    * funciona enquanto alguém está olhando, e não avisa ninguém quando não
    * está.
+   *
+   * O sistema NÃO finge ter alertado quando isto falta: o vigia do worker
+   * grava `alerta_estado = 'desabilitado'` no incidente e o boot da API
+   * registra a ausência em nível de erro. Ver `VigiaWorkerService` e
+   * `ObservabilidadeService.enviarAlerta`.
+   *
+   * O VALOR É SEGREDO. Numa URL de webhook do Slack/Discord o token está no
+   * caminho: quem tem a URL posta no canal. Por isso ela nunca é escrita em
+   * log — `ObservabilidadeService` troca o endereço por um marcador antes de
+   * registrar qualquer falha de envio.
    */
   ALERTA_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
 })

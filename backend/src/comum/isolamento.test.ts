@@ -6,6 +6,7 @@ import type { AuditoriaService } from "../auditoria/auditoria.service";
 import type { SupabaseService } from "../supabase/supabase.service";
 import type { WhatsappService } from "../whatsapp/whatsapp.service";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
+import type { LimitesService } from "./limites.service";
 
 /**
  * Isolamento entre duas empresas, exercitando os SERVIÇOS de verdade.
@@ -226,6 +227,19 @@ function supabaseFalso(banco: Banco): SupabaseService {
 /** Auditoria de verdade grava e derivaria empresa; aqui só não pode atrapalhar. */
 const auditoriaFalsa = { registrar: async () => undefined } as unknown as AuditoriaService;
 
+/**
+ * Limites que nunca barram.
+ *
+ * O assunto aqui é ISOLAMENTO, não capacidade: um teto disparando no meio
+ * destes testes faria um `ConflictException` passar por "acesso negado" e
+ * esconderia exatamente o que eles existem para provar. Os limites têm suíte
+ * própria em `limites.test.ts`.
+ */
+const limitesFalsos = {
+  exigirEspacoParaCanal: async () => undefined,
+  exigirEspacoParaCampanha: async () => undefined,
+} as unknown as LimitesService;
+
 function usuario(
   id: string,
   empresaId: string | null,
@@ -249,6 +263,7 @@ describe("isolamento entre empresas — canais", () => {
       supabaseFalso(banco),
       auditoriaFalsa,
       {} as unknown as WhatsappService,
+      limitesFalsos,
     );
   });
 

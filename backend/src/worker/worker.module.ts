@@ -5,6 +5,7 @@ import { AuditoriaModule } from "../auditoria/auditoria.module";
 import { WhatsappModule } from "../whatsapp/whatsapp.module";
 import { FilaModule } from "../fila/fila.module";
 import { ObservabilidadeModule } from "../observabilidade/observabilidade.module";
+import { LimitesModule } from "../comum/limites.module";
 import { DisparoService } from "./disparo.service";
 
 /**
@@ -19,6 +20,8 @@ import { DisparoService } from "./disparo.service";
     WhatsappModule,
     FilaModule,
     ObservabilidadeModule,
+    // A cota diária por empresa é consumida no caminho do envio, aqui dentro.
+    LimitesModule,
   ],
   providers: [DisparoService],
 })

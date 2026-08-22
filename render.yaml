@@ -35,10 +35,20 @@ envVarGroups:
       # Gere com: openssl rand -hex 32
       - key: EVOLUTION_WEBHOOK_SECRET
         sync: false
-      # Opcional. Webhook de entrada do Slack/Discord/Teams (ou endpoint
-      # próprio) que recebe um POST a cada 500 da API ou crash do worker. Sem
-      # isto os dois só logam no Render — ninguém é avisado fora do horário em
-      # que alguém está olhando. Ver o comentário em `.env.example`.
+      # Tecnicamente opcional, na prática o que separa "o worker caiu às 3h e
+      # alguém soube" de "o cliente descobriu pelo silêncio, no dia seguinte".
+      #
+      # Webhook de entrada do Slack/Discord/Teams (ou endpoint próprio) que
+      # recebe um POST a cada 500 da API, crash do worker e — o que mais
+      # importa — quando o vigia detecta o worker sem bater pulso há 3 min.
+      #
+      # Sem isto o sistema NÃO finge ter alertado: a API registra a ausência em
+      # nível de erro no boot, e o incidente fica gravado com
+      # `alerta_estado = 'desabilitado'` (ver 20260822000600). O aviso existe;
+      # o que não existe é alguém para recebê-lo.
+      #
+      # O VALOR É SEGREDO: numa URL de webhook do Slack/Discord o token está no
+      # caminho. Nunca vai para log — a API troca o endereço por um marcador.
       - key: ALERTA_WEBHOOK_URL
         sync: false
 

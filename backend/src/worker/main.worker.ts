@@ -51,7 +51,28 @@ async function iniciar() {
     await disparo.planejarCampanha(job.data);
   });
 
-  // Envio: a concorrência é o que controla a pressão sobre os números.
+  /**
+   * Envio.
+   *
+   * ATENÇÃO À SEMÂNTICA DE `DISPARO_CONCORRENCIA_POR_CANAL`: o nome diz "por
+   * canal", mas o valor vira `batchSize` da fila `disparo-contato`, que é
+   * GLOBAL — vale para todos os canais, todas as campanhas e todas as empresas
+   * somados. Com o padrão `1`, o worker processa um contato por vez no sistema
+   * inteiro; com `5`, cinco ao mesmo tempo, e nada garante que sejam de canais
+   * diferentes.
+   *
+   * O laço abaixo ainda é `await` sequencial dentro do lote, então na prática
+   * o paralelismo real é 1 mesmo com `batchSize` maior — o que muda é quantos
+   * jobs saem da fila por rodada. Subir o número sem trocar este laço por
+   * `Promise.all` não acelera nada; trocar o laço por `Promise.all` acelera e
+   * derruba a garantia de cadência que o `startAfter` de cada job carrega,
+   * porque vários contatos passariam a sair no mesmo instante.
+   *
+   * Por isso o valor NÃO deve ser mexido sem estudar o efeito: cadência fixa e
+   * rajada simultânea são os dois padrões que mais pesam no risco de bloqueio
+   * do número, e o sistema inteiro (intervalos sorteados, rodízio de canais,
+   * cota diária) existe para evitá-los.
+   */
   await boss.work<JobContato>(
     FILA_CONTATO,
     { batchSize: disparo.concorrenciaPorCanal() },
@@ -91,8 +112,19 @@ async function iniciar() {
    * consumia — os jobs se acumulavam no schema `fila` sem que ninguém soubesse
    * que tinham morrido. Cada um vira um incidente visível no painel.
    */
+  /*
+   * O JOB INTEIRO, não só `job.data`.
+   *
+   * `jobs_mortos` deduplica por `job_id`, e o id só existe aqui: o handler da
+   * dead letter roda em lote e, se falhar no meio, o pg-boss reentrega o que
+   * não completou — sem o id, o mesmo job morto viraria duas linhas e o
+   * operador reprocessaria duas vezes. Um "mecanismo de recuperação" que
+   * duplica mensagem é pior que não ter mecanismo nenhum.
+   */
   await boss.work(FILA_MORTOS, { batchSize: 10 }, async (jobs) => {
-    for (const job of jobs) await disparo.registrarJobMorto(job.data);
+    for (const job of jobs) {
+      await disparo.registrarJobMorto({ id: job.id, name: job.name, data: job.data });
+    }
   });
 
   logger.log(

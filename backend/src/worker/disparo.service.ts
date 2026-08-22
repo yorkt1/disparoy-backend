@@ -17,12 +17,16 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { WhatsappService } from "../whatsapp/whatsapp.service";
 import {
+  FILA_CAMPANHA,
+  FILA_CONTATO,
   FilaService,
   type ContatoAgendado,
   type JobCampanha,
   type JobContato,
 } from "../fila/fila.service";
 import { COLUNAS_CANAL, paraCanal, type LinhaCanal } from "../comum/mapeadores";
+import { LimitesService } from "../comum/limites.service";
+import { explicarLimite, LIMITES_POR_PLANO, PLANO_PADRAO } from "../comum/limites-empresa";
 import { ambiente } from "../config/ambiente";
 
 const COLUNAS_EXECUCAO =
@@ -103,6 +107,7 @@ export class DisparoService {
     private readonly auditoria: AuditoriaService,
     private readonly whatsapp: WhatsappService,
     private readonly fila: FilaService,
+    private readonly limites: LimitesService,
   ) {}
 
   // ------------------------------------------------------------------------
@@ -146,7 +151,7 @@ export class DisparoService {
      * Com o filtro `enfileirado_em is null` dentro do próprio UPDATE, dois
      * planejamentos concorrentes disputam a linha no Postgres e só um a leva.
      */
-    const reservados = await this.reservarPendentes(job.campanhaId);
+    const reservados = await this.reservarPendentes(job.campanhaId, campanha.empresaId);
     if (reservados.length === 0) {
       await this.finalizarSeTerminou(job.campanhaId);
       return;
@@ -155,23 +160,44 @@ export class DisparoService {
     // Rodízio entre os canais: reduz o volume por número, que é o que mais
     // pesa no risco de bloqueio.
     let atrasoAcumulado = 0;
-    const agendados: ContatoAgendado[] = reservados.map((contatoId, i) => {
-      const canal = canais[i % canais.length];
-      const item: ContatoAgendado = {
-        dados: {
-          campanhaId: job.campanhaId,
-          contatoId,
-          canalId: canal.id,
-          rodada: campanha.rodada,
-        },
-        atrasoSegundos: atrasoAcumulado,
-      };
+    const atrasos = reservados.map(() => {
+      const atraso = atrasoAcumulado;
       atrasoAcumulado += this.sortearIntervalo(
         campanha.intervaloContatosMin,
         campanha.intervaloContatosMax,
       );
-      return item;
+      return atraso;
     });
+
+    /**
+     * Onde esta leva começa na linha do tempo da campanha.
+     *
+     * Todo planejamento anterior começava o atraso em ZERO. Com um
+     * planejamento só por campanha isso estava certo; com mais de um deixou de
+     * estar, e mais de um já acontecia antes desta mudança — `reconciliar_
+     * disparos` devolve contatos travados e `replanejarPendentesOrfas` chama o
+     * planejamento de novo, com a campanha ainda cheia de jobs agendados para
+     * as próximas horas. Os recuperados eram agendados a partir de agora e
+     * caíam POR CIMA dos que já estavam marcados: a cadência de 15–45 s virava
+     * dois envios no mesmo instante, que é exatamente o padrão que faz o
+     * número ser bloqueado.
+     *
+     * `reservar_janela_de_envio` resolve isso no banco, num UPDATE só: cada
+     * leva reserva o próprio trecho da linha do tempo e empurra `fila_ate`.
+     * Dois planejamentos concorrentes recebem trechos que não se sobrepõem.
+     */
+    const inicio = await this.reservarJanela(job.campanhaId, atrasoAcumulado);
+    const deslocamentoBase = Math.max((inicio.getTime() - Date.now()) / 1000, 0);
+
+    const agendados: ContatoAgendado[] = reservados.map((contatoId, i) => ({
+      dados: {
+        campanhaId: job.campanhaId,
+        contatoId,
+        canalId: canais[i % canais.length].id,
+        rodada: campanha.rodada,
+      },
+      atrasoSegundos: deslocamentoBase + atrasos[i],
+    }));
 
     try {
       await this.fila.agendarContatosEmLote(agendados);
@@ -180,12 +206,18 @@ export class DisparoService {
       // marcados como enfileirados para jobs que nunca existiram — pendentes
       // para sempre, invisíveis para o replanejamento.
       await this.devolverReserva(reservados);
+      // E a janela também: `fila_ate` foi empurrado por uma leva que não virou
+      // job nenhum. Sem devolver, o replanejamento seguinte agendaria DEPOIS
+      // do buraco — numa leva de 2.000 contatos são ~16 h de silêncio, sem
+      // nada na tela explicando por quê.
+      await this.devolverJanela(job.campanhaId, inicio, atrasoAcumulado);
       throw e;
     }
 
     this.logger.log(
       `Campanha "${campanha.nome}": ${reservados.length} contatos em ${canais.length} canais ` +
-        `(último começa em ~${Math.round(atrasoAcumulado / 60)} min).`,
+        `(primeiro em ~${Math.round(deslocamentoBase / 60)} min, ` +
+        `último em ~${Math.round((deslocamentoBase + atrasoAcumulado) / 60)} min).`,
     );
   }
 
@@ -238,6 +270,43 @@ export class DisparoService {
     }
 
     /**
+     * Cota diária da EMPRESA, antes da do canal.
+     *
+     * O teto do canal protege o NÚMERO contra bloqueio; este protege o worker,
+     * que é um processo só compartilhado por todos os clientes. Sem ele, um
+     * cliente que importa 300 mil contatos ocupa a fila por dias e as campanhas
+     * dos outros ficam "em andamento" a 0% — sem erro em lugar nenhum, que é a
+     * falha mais difícil de diagnosticar que este produto tem.
+     *
+     * Vem primeiro de propósito: se a empresa já estourou o dia, não faz
+     * sentido consumir cota do canal para devolvê-la na linha seguinte.
+     *
+     * O contato volta para `pendente` e sai amanhã. Marcar `falhou` por causa
+     * de um limite NOSSO destruiria a campanha do cliente — é a mesma regra que
+     * o resto do worker segue para falha de canal (ver
+     * `ARQUITETURA-ATRIBUICAO-DE-FALHA.md`).
+     */
+    const temCotaDaEmpresa = await this.limites.consumirCota(campanha.empresaId, restantes);
+    if (!temCotaDaEmpresa) {
+      const teto = campanha.empresaId
+        ? (await this.limites.limitesDe(campanha.empresaId)).mensagensPorDia
+        : null;
+
+      this.logger.warn(
+        `Empresa ${campanha.empresaId} atingiu o limite diário de mensagens; contato adiado.`,
+      );
+      // Incidente, e não só log: adiar por limite é decisão correta do sistema
+      // e invisível para quem está olhando a campanha desacelerar. Mesmo
+      // tratamento que `cota_diaria_atingida` do canal já recebe.
+      await this.registrarIncidenteDaEmpresa(campanha.empresaId, {
+        campanhaId: job.campanhaId,
+        detalhe: explicarLimite("mensagens", teto ?? 0),
+      });
+      await this.liberarParaReplanejar(job.contatoId);
+      return;
+    }
+
+    /**
      * Cota diária do canal, consumida no banco com lock.
      *
      * Estourar o teto de um número novo é o caminho mais rápido para bloqueio,
@@ -250,6 +319,11 @@ export class DisparoService {
       p_quantidade: restantes,
     });
     if (temCota !== true) {
+      // A cota da empresa foi consumida na linha de cima e nenhuma mensagem
+      // vai sair: sem devolver, o teto diário do cliente seria queimado por um
+      // envio que não aconteceu — e num canal com limite baixo isso zeraria o
+      // dia inteiro dele em minutos.
+      await this.limites.devolverCota(campanha.empresaId, restantes);
       this.logger.warn(`Canal ${canal.nome} atingiu o limite diário; contato adiado.`);
       // Abre incidente em vez de só logar: adiar por cota é decisão correta do
       // sistema, mas invisível. O operador via a campanha desacelerar sem saber
@@ -280,6 +354,7 @@ export class DisparoService {
       const [checagem] = await this.whatsapp.validarNumeros(canal, [destino.telefone]);
       if (checagem?.verificado && !checagem.existeNoWhatsApp) {
         await this.devolverCota(canal.id, restantes);
+        await this.limites.devolverCota(campanha.empresaId, restantes);
         await this.encerrarContato(
           job,
           "invalido",
@@ -316,7 +391,10 @@ export class DisparoService {
 
     // Cota é reserva, não cobrança: o que não virou mensagem volta para o
     // canal. Em número novo, cota queimada à toa é campanha parada mais cedo.
+    // A da empresa segue a mesma regra, e pelo mesmo motivo — um passo que
+    // falhou não pode consumir o teto diário do cliente.
     await this.devolverCota(canal.id, restantes - enviados);
+    await this.limites.devolverCota(campanha.empresaId, restantes - enviados);
 
     if (!falha) {
       await this.encerrarContato(job, "concluido", null);
@@ -446,6 +524,34 @@ export class DisparoService {
     if (error) this.logger.error(`Falha ao registrar incidente ${codigo}: ${error.message}`);
   }
 
+  /**
+   * Incidente de limite da EMPRESA — fora da união `CodigoFalha`, de propósito.
+   *
+   * Aquele tipo classifica falha de ENVIO de mensagem, e o compilador recusar
+   * caminho não coberto é o que o mantém útil (ver `shared/src/whatsapp/
+   * falhas.ts`). "O cliente bateu no teto do plano" não é falha de envio: é
+   * uma decisão de capacidade nossa. `incidentes.codigo` é `text`, não o enum,
+   * e o vigia do worker já usa esse espaço da mesma forma (`worker_parado`).
+   */
+  private async registrarIncidenteDaEmpresa(
+    empresaId: string | null,
+    ctx: { campanhaId?: string; detalhe?: string },
+  ): Promise<void> {
+    const { error } = await this.supabase.db.rpc("abrir_incidente", {
+      p_categoria: "limite",
+      p_codigo: "limite_empresa_atingido",
+      p_titulo: "Limite diário de mensagens da empresa atingido",
+      p_canal_id: null,
+      p_campanha_id: ctx.campanhaId ?? null,
+      p_detalhe: ctx.detalhe ?? null,
+    });
+    if (error) {
+      this.logger.error(
+        `Falha ao registrar incidente de limite da empresa ${empresaId}: ${error.message}`,
+      );
+    }
+  }
+
   // ------------------------------------------------------------------------
   // Job 3: manutenção (cron de um minuto)
   // ------------------------------------------------------------------------
@@ -471,12 +577,76 @@ export class DisparoService {
     // devolveria trabalho para uma fila que não tem por onde sair.
     await this.vigiarCanais();
     await this.reconciliarTravados();
+    await this.reenfileirarAgendamentosVencidos();
     await this.replanejarPendentesOrfas();
     await this.agregarMetricas();
     await this.concluirOrfas();
     await this.limparEventosAntigos();
     await this.limparAvisosAntigos();
     await this.limparFreiosExpirados();
+    await this.limparCotasAntigas();
+  }
+
+  /**
+   * Campanhas agendadas cuja hora passou e que não têm job vivo.
+   *
+   * É a rede de segurança do agendamento, e ela NÃO depende da fila.
+   *
+   * O que ela conserta: `agendarCampanha` guarda o agendamento como um job do
+   * pg-boss com `startAfter`. O pg-boss apaga job pela retenção — 14 dias no
+   * padrão, contados da CRIAÇÃO. Uma campanha marcada para daqui a 30 dias
+   * perdia o job no dia 14 e, no dia marcado, nada acontecia: sem erro, sem
+   * incidente, com a campanha parada em `agendada` para sempre. A retenção
+   * agora acompanha o agendamento (ver `FilaService.agendarCampanha`), mas
+   * isso é só parar de destruir o job — a garantia é esta função.
+   *
+   * Cobre também o worker fora do ar por dias: o estado vive em `campanhas`, e
+   * a primeira manutenção depois do retorno encontra tudo que venceu enquanto
+   * ninguém estava olhando. Vale igual para reinício — não há estado em
+   * memória de processo aqui.
+   *
+   * POR QUE NÃO DISPARA ANTES DA HORA: o filtro é `agendada_para <= now()`,
+   * avaliado no BANCO. Não existe caminho por onde uma campanha futura entre
+   * nesta lista.
+   *
+   * POR QUE NÃO DUPLICA: a reivindicação é um `update ... returning` atômico,
+   * então dois workers não pegam a mesma campanha; se o job do pg-boss tiver
+   * sobrevivido e os dois chegarem ao `planejarCampanha`, quem reserva cada
+   * contato é `reservar_contatos_pendentes`, e ele só entrega linha com
+   * `enfileirado_em is null` — o segundo planejamento encontra zero e encerra.
+   */
+  private async reenfileirarAgendamentosVencidos(): Promise<void> {
+    const { data, error } = await this.supabase.db.rpc("reivindicar_agendamentos_vencidos", {
+      p_limite: 50,
+      p_carencia_minutos: 5,
+    });
+
+    if (error) {
+      this.logger.error(`Não foi possível recuperar agendamentos vencidos: ${error.message}`);
+      return;
+    }
+
+    const vencidas = (data ?? []) as { campanha_id: string; rodada: number }[];
+    for (const c of vencidas) {
+      await this.fila.reenfileirarAgendamento(c.campanha_id, c.rodada ?? 0);
+      this.logger.warn(
+        `Campanha ${c.campanha_id} estava agendada com a hora vencida e sem job; reenfileirada.`,
+      );
+    }
+  }
+
+  /** Histórico de cota por empresa — 180 dias. Ver `limparAvisosAntigos`. */
+  private async limparCotasAntigas(): Promise<void> {
+    const { data, error } = await this.supabase.db.rpc("limpar_cotas_empresa_antigas", {
+      p_dias: 180,
+    });
+    if (error) {
+      this.logger.error(`Limpeza de cotas por empresa falhou: ${error.message}`);
+      return;
+    }
+    if (typeof data === "number" && data > 0) {
+      this.logger.log(`${data} linha(s) de cota diária antigas removidas.`);
+    }
   }
 
   /**
@@ -696,20 +866,114 @@ export class DisparoService {
    * Job que esgotou as tentativas e caiu na dead letter.
    *
    * A fila de mortos existia desde o começo e nunca teve leitor: os jobs
-   * ficavam guardados no schema `fila` e ninguém olhava. Evidência que ninguém
-   * lê não é evidência — aqui ela ao menos vira um incidente visível.
+   * ficavam guardados no schema `fila` e ninguém olhava. Depois passou a abrir
+   * um incidente — e aí a informação se perdia de outro jeito.
+   *
+   * `abrir_incidente` é upsert sobre `(categoria, codigo, canal_id)`. Todo job
+   * morto sem canal caía na MESMA chave: o primeiro criava a linha, e do
+   * segundo em diante só `ocorrencias` subia e `detalhe` era sobrescrito pelo
+   * mais recente. Quinhentos contatos perdidos viravam um incidente dizendo
+   * "ocorrencias: 500" e o id do último. Não dava para saber QUAIS ficaram
+   * para trás, logo não dava para recuperá-los — o registro existia e não
+   * servia para nada.
+   *
+   * Agora cada job morto é uma LINHA em `jobs_mortos`, com o payload inteiro.
+   * O incidente continua, com código próprio (`job_morto`), no papel que faz
+   * bem: avisar que aconteceu. Quem responde "o quê, exatamente" é a tabela.
+   *
+   * Recuperação é MANUAL (`reprocessar_job_morto`), e isso é decisão: um job
+   * que já gastou os retries provou que aquele caminho não funciona, e
+   * reinsistir sozinho vira laço consumindo a fila. No caso mais provável —
+   * mídia que a Evolution recusa, número que trava a instância — o
+   * reprocessamento automático transformaria uma falha permanente em carga
+   * permanente.
    */
-  async registrarJobMorto(dados: unknown): Promise<void> {
-    const d = (dados ?? {}) as { campanhaId?: string; canalId?: string; contatoId?: number };
-    this.logger.error(`Job morto na fila: ${JSON.stringify(d)}`);
+  async registrarJobMorto(job: { id?: string; name?: string; data?: unknown }): Promise<void> {
+    const dados = (job.data ?? {}) as {
+      campanhaId?: string;
+      canalId?: string;
+      contatoId?: number;
+    };
+    /*
+     * A fila de ORIGEM é deduzida do payload, não lida de `job.name`.
+     *
+     * O pg-boss não preserva a origem: ao mover para a dead letter ele INSERE
+     * uma linha nova na fila de destino copiando só `data`, `output`,
+     * `retry_limit` e `keep_until` (ver `plans.js`, `dlq_jobs`). `job.name`
+     * aqui é sempre "disparo-mortos", o que não ajuda ninguém a entender o que
+     * quebrou. A forma do payload distingue os dois casos que existem, e é a
+     * informação que de fato está disponível.
+     */
+    const filaDeOrigem =
+      dados.contatoId !== undefined
+        ? FILA_CONTATO
+        : dados.campanhaId !== undefined
+          ? FILA_CAMPANHA
+          : (job.name ?? "desconhecida");
 
-    await this.registrarIncidente("desconhecido", {
-      canalId: d.canalId,
-      campanhaId: d.campanhaId,
-      detalhe:
-        `Um job de disparo esgotou as tentativas e foi descartado` +
-        (d.contatoId ? ` (contato ${d.contatoId}).` : "."),
+    this.logger.error(`Job morto vindo de ${filaDeOrigem} (dead letter ${job.id ?? "?"}).`);
+
+    const { data: id, error } = await this.supabase.db.rpc("registrar_job_morto", {
+      p_fila: filaDeOrigem,
+      // `?? null`: um job antigo pode não trazer id, e a coluna aceita nulo
+      // justamente para o registro não se perder por causa disso.
+      p_job_id: job.id ?? null,
+      p_payload: dados,
+      p_motivo: "Esgotou as tentativas e caiu na dead letter.",
     });
+
+    if (error) {
+      // Isto é o registro da falha falhando. Não há para onde escalar além do
+      // log — e é exatamente por isso que ele é `error` e carrega o payload.
+      this.logger.error(
+        `Falha ao gravar o job morto (o payload seria perdido): ${error.message} — ` +
+          `payload: ${JSON.stringify(dados)}`,
+      );
+    }
+
+    await this.registrarIncidenteDeJobMorto({
+      canalId: dados.canalId,
+      campanhaId: dados.campanhaId,
+      // `Number(null)` é 0, e `Number.isFinite(0)` é true: sem esta guarda, a
+      // gravação FALHANDO produzia um incidente mandando o operador rodar
+      // `reprocessar_job_morto(0)`, que não existe. Um registro inventado é
+      // pior que registro nenhum — este é o caminho de perder informação, e
+      // ele não pode mentir sobre onde ela está.
+      registro: typeof id === "number" && Number.isFinite(id) ? id : null,
+      contatoId: dados.contatoId,
+    });
+  }
+
+  /**
+   * Incidente de job morto. Código próprio, fora da união `CodigoFalha`.
+   *
+   * `desconhecido` era o código usado antes, e ele significa outra coisa: "o
+   * gateway devolveu um erro que a taxonomia ainda não classifica" (ver
+   * `shared/src/whatsapp/falhas.ts`). Misturar as duas coisas fazia o
+   * diagnóstico de falhas de ENVIO contar jobs mortos junto, e o operador
+   * procurava um problema de WhatsApp que não existia.
+   */
+  private async registrarIncidenteDeJobMorto(ctx: {
+    canalId?: string;
+    campanhaId?: string;
+    contatoId?: number;
+    registro: number | null;
+  }): Promise<void> {
+    const referencia =
+      ctx.registro === null
+        ? "O registro em jobs_mortos NÃO pôde ser gravado — o payload está apenas no log do worker."
+        : `Registro ${ctx.registro} em jobs_mortos. ` +
+          `Reprocessar com: select reprocessar_job_morto(${ctx.registro});`;
+
+    const { error } = await this.supabase.db.rpc("abrir_incidente", {
+      p_categoria: "infra",
+      p_codigo: "job_morto",
+      p_titulo: "Um job de disparo esgotou as tentativas",
+      p_canal_id: ctx.canalId ?? null,
+      p_campanha_id: ctx.campanhaId ?? null,
+      p_detalhe: (ctx.contatoId ? `Contato ${ctx.contatoId}. ` : "") + referencia,
+    });
+    if (error) this.logger.error(`Falha ao registrar incidente de job morto: ${error.message}`);
   }
 
   private async reconciliarTravados(): Promise<void> {
@@ -872,21 +1136,93 @@ export class DisparoService {
     };
   }
 
-  /** Reserva os pendentes e devolve os ids, em ordem estável. */
-  private async reservarPendentes(campanhaId: string): Promise<number[]> {
-    const { data, error } = await this.supabase
-      .tabela("campanha_contatos")
-      .update({ enfileirado_em: new Date().toISOString() })
-      .eq("campanha_id", campanhaId)
-      .eq("status", "pendente")
-      .is("enfileirado_em", null)
-      .select("id");
+  /**
+   * Reserva os pendentes — com TETO — e devolve os ids em ordem estável.
+   *
+   * Antes: `update ... where enfileirado_em is null` sobre a campanha inteira.
+   * Uma campanha de 200 mil contatos devolvia 200 mil ids num array de
+   * JavaScript e virava 400 inserts de lote numa tacada só, com o job de
+   * planejamento segurando a fila do começo ao fim. Enquanto isso, NENHUMA
+   * outra campanha planejava — um cliente grande travava a fila dos outros.
+   *
+   * A atomicidade é a mesma, e é o ponto: continua sendo UM `update ...
+   * returning`, agora dentro de `reservar_contatos_pendentes`. Dois workers
+   * chamando isto ao mesmo tempo NÃO recebem o mesmo contato — o `for update
+   * skip locked` do subselect faz o segundo nem enxergar as linhas travadas
+   * pelo primeiro, e o `enfileirado_em is null` continua no WHERE do UPDATE
+   * como segunda trava.
+   *
+   * O que fica de fora do teto sai no ciclo seguinte: `campanhas_a_replanejar`
+   * roda de minuto em minuto procurando exatamente "pendente sem job". Nenhum
+   * contato se perde — ele só é agendado mais tarde, e `reservar_janela_de_
+   * envio` garante que "mais tarde" seja DEPOIS do último já agendado, não por
+   * cima dele.
+   */
+  private async reservarPendentes(campanhaId: string, empresaId: string | null): Promise<number[]> {
+    const { data, error } = await this.supabase.db.rpc("reservar_contatos_pendentes", {
+      p_campanha_id: campanhaId,
+      p_limite: await this.tetoPorPlanejamento(empresaId),
+    });
 
     if (error) throw new Error(`Falha ao reservar contatos da campanha: ${error.message}`);
 
     // O RETURNING do Postgres não promete ordem, e a ordem importa: define o
     // rodízio de canais e o atraso acumulado de cada contato.
-    return ((data ?? []) as { id: number }[]).map((l) => l.id).sort((a, b) => a - b);
+    return ((data ?? []) as { contato_id: number }[])
+      .map((l) => Number(l.contato_id))
+      .sort((a, b) => a - b);
+  }
+
+  /** Quantos contatos um planejamento reserva por vez, pelo plano da empresa. */
+  private async tetoPorPlanejamento(empresaId: string | null): Promise<number> {
+    if (empresaId === null) return LIMITES_POR_PLANO[PLANO_PADRAO].contatosPorPlanejamento;
+    return (await this.limites.limitesDe(empresaId)).contatosPorPlanejamento;
+  }
+
+  /**
+   * Reserva o trecho da linha do tempo desta leva e devolve onde ele começa.
+   *
+   * Ver `reservar_janela_de_envio` na migration 20260822000300 para o porquê:
+   * sem isto, duas levas da mesma campanha são agendadas uma por cima da
+   * outra e a cadência de 15–45 s vira dois envios no mesmo instante.
+   */
+  private async reservarJanela(campanhaId: string, duracaoSegundos: number): Promise<Date> {
+    const { data, error } = await this.supabase.db.rpc("reservar_janela_de_envio", {
+      p_campanha_id: campanhaId,
+      p_duracao_segundos: Math.round(duracaoSegundos),
+    });
+
+    if (error) {
+      // Cair para "agora" mantém o comportamento anterior a esta mudança —
+      // pior do que a janela, melhor do que não agendar nada.
+      this.logger.warn(`Não foi possível reservar a janela de envio: ${error.message}`);
+      return new Date();
+    }
+    const inicio = typeof data === "string" ? new Date(data) : new Date();
+    return Number.isNaN(inicio.getTime()) ? new Date() : inicio;
+  }
+
+  /**
+   * Desfaz a reserva da janela quando o enfileiramento falhou.
+   *
+   * A RPC é compare-and-swap: só escreve se `fila_ate` ainda for o que esta
+   * leva gravou. Se outro planejamento avançou a linha do tempo no meio, ela
+   * não faz nada — devolver ali encavalaria a leva do outro, que é o problema
+   * que a janela existe para evitar.
+   */
+  private async devolverJanela(
+    campanhaId: string,
+    inicio: Date,
+    duracaoSegundos: number,
+  ): Promise<void> {
+    const { error } = await this.supabase.db.rpc("devolver_janela_de_envio", {
+      p_campanha_id: campanhaId,
+      p_inicio: inicio.toISOString(),
+      p_duracao_segundos: Math.round(duracaoSegundos),
+    });
+    // Não relança: quem chamou já está tratando um erro, e o pior caso aqui é
+    // a campanha retomar depois de um intervalo maior — não perder contato.
+    if (error) this.logger.warn(`Não foi possível devolver a janela de envio: ${error.message}`);
   }
 
   /**

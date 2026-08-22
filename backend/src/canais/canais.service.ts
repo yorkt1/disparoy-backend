@@ -30,6 +30,7 @@ import { gerarPlanilhaContatos } from "../contatos/planilha";
 import { BUCKET_MIDIA } from "../midia/midia.service";
 import { ambiente } from "../config/ambiente";
 import { empresaParaEscrita, noEscopo } from "../comum/escopo";
+import { LimitesService } from "../comum/limites.service";
 import { COLUNAS_CANAL, paraCanal, type LinhaCanal } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 
@@ -70,6 +71,7 @@ export class CanaisService {
     private readonly supabase: SupabaseService,
     private readonly auditoria: AuditoriaService,
     private readonly whatsapp: WhatsappService,
+    private readonly limites: LimitesService,
   ) {}
 
   /**
@@ -191,6 +193,17 @@ export class CanaisService {
     expiraEm: string | null;
     aviso?: string;
   }> {
+    const empresaId = empresaParaEscrita(usuario);
+
+    /*
+     * Teto de canais — antes de criar a instância na Evolution.
+     *
+     * A ordem importa: `iniciarSessaoQr` cria uma instância no servidor
+     * Evolution, e ela sobrevive à recusa daqui. Barrar depois deixaria lixo
+     * pareável no gateway que ninguém no produto consegue ver nem apagar.
+     */
+    await this.limites.exigirEspacoParaCanal(empresaId);
+
     // O nome da instância não pode mais sair do número, que ainda não existe.
     // Vem do nome mais um sufixo aleatório: o prefixo `disparoy_` separa das
     // instâncias de outros sistemas no mesmo servidor Evolution, e o sufixo
@@ -210,7 +223,7 @@ export class CanaisService {
         limite_diario: dados.limiteDiario ?? null,
         estagio_aquecimento: dados.estagioAquecimento,
         criado_por: usuario.id,
-        empresa_id: empresaParaEscrita(usuario),
+        empresa_id: empresaId,
       })
       .select(COLUNAS_CANAL)
       .single();

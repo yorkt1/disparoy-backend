@@ -10,7 +10,15 @@ import { ambiente } from "../config/ambiente";
 
 export const FILA_CAMPANHA = "disparo-campanha";
 export const FILA_CONTATO = "disparo-contato";
-/** Jobs que esgotaram as tentativas. Não são reprocessados: são evidência. */
+/**
+ * Jobs que esgotaram as tentativas.
+ *
+ * Não são reprocessados AUTOMATICAMENTE, e isso é decisão: um job que já
+ * gastou os retries provou que o caminho não funciona, e reinsistir sozinho
+ * vira laço consumindo a fila. Cada um vira uma linha em `jobs_mortos`, com o
+ * payload inteiro, e o operador reprocessa por `reprocessar_job_morto` quando
+ * souber o que quebrou.
+ */
 export const FILA_MORTOS = "disparo-mortos";
 /** Reconciliação, métricas e retenção dos avisos/eventos. Cron de 1 min. */
 export const FILA_MANUTENCAO = "manutencao";
@@ -174,6 +182,18 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
   /**
    * Enfileira o início da campanha. Com `agendadaPara` no futuro, o pg-boss
    * segura o job até a hora — é assim que o agendamento da etapa 5 funciona.
+   *
+   * A retenção acompanha o agendamento, e isso NÃO é a rede de segurança —
+   * é só parar de destruir o job antes da hora. O padrão do pg-boss é
+   * `keep_until = agora + 14 dias`, contado da CRIAÇÃO e não do `startAfter`:
+   * uma campanha marcada para daqui a 30 dias virava um job que a manutenção
+   * do próprio pg-boss apagava no dia 14, e no dia marcado nada acontecia.
+   *
+   * A rede de segurança de verdade é `reivindicar_agendamentos_vencidos`, no
+   * banco, chamada pela manutenção do worker (ver
+   * `DisparoService.reenfileirarAgendamentosVencidos`): ela não depende deste
+   * job existir. Os dois juntos cobrem os dois modos de falha — o job sumir da
+   * fila, e a fila inteira ficar para trás enquanto o worker esteve fora.
    */
   async agendarCampanha(dados: JobCampanha, agendadaPara: string | null): Promise<string | null> {
     const atraso = agendadaPara
@@ -185,6 +205,13 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
       retryLimit: 3,
       retryDelay: 30,
       retryBackoff: true,
+      /*
+       * Dias até a hora marcada, com 14 de folga (o padrão anterior) para o
+       * job ainda existir se alguém precisar inspecioná-lo depois de rodar.
+       * Piso em 14 para agendamento nenhum ficar com retenção MENOR do que
+       * tinha antes desta mudança.
+       */
+      retentionDays: Math.max(Math.ceil(atraso / 86_400) + 14, 14),
       // Evita dois planejamentos simultâneos para a mesma campanha. Não é a
       // garantia principal contra envio duplicado — essa é `enfileirado_em`,
       // no banco: a chave do pg-boss é liberada assim que o job completa.
@@ -257,6 +284,32 @@ export class FilaService implements OnModuleInit, OnModuleDestroy {
       FILA_CAMPANHA,
       { campanhaId, rodada } satisfies JobCampanha,
       { retryLimit: 3, retryDelay: 30, singletonKey: `replan:${campanhaId}:${rodada}` },
+    );
+  }
+
+  /**
+   * Reenfileira o início de uma campanha AGENDADA cuja hora já passou.
+   *
+   * Chamada pela manutenção depois de `reivindicar_agendamentos_vencidos`. É a
+   * rede que torna o agendamento independente da fila: quando o job original
+   * sumiu (retenção do pg-boss) ou o worker passou dias fora, é por aqui que a
+   * campanha volta a andar.
+   *
+   * `startAfter` NÃO é passado: a hora já passou — quem garante que nada é
+   * antecipado é o filtro `agendada_para <= now()` dentro da RPC, no banco,
+   * que é onde o relógio é único. Confiar no `Date.now()` de um processo para
+   * essa decisão é o tipo de coisa que quebra com o relógio de uma réplica
+   * atrasado.
+   *
+   * Chave própria (`agendado:`) e não a de `replanejar`: são motivos
+   * diferentes, e uma chave compartilhada faria um replanejamento em voo
+   * engolir em silêncio o reenfileiramento do agendamento.
+   */
+  async reenfileirarAgendamento(campanhaId: string, rodada: number): Promise<void> {
+    await this.exigirBoss().send(
+      FILA_CAMPANHA,
+      { campanhaId, rodada } satisfies JobCampanha,
+      { retryLimit: 3, retryDelay: 30, singletonKey: `agendado:${campanhaId}:${rodada}` },
     );
   }
 

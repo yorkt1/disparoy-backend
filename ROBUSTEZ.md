@@ -195,6 +195,63 @@ supabase/migrations/20260813000100_robustez.sql
 A migration é idempotente (`if not exists`, `create or replace`) e roda sobre o
 banco que já está no ar.
 
+---
+
+## Concorrência: é GLOBAL, e o nome da variável mente
+
+`DISPARO_CONCORRENCIA_POR_CANAL` **não é por canal.** O valor vira o
+`batchSize` da fila `disparo-contato` em `main.worker.ts`, que vale para todos
+os canais, todas as campanhas e todas as empresas **somados**. Com o padrão
+`1`, o worker processa um contato por vez no sistema inteiro.
+
+O nome ficou porque trocá-lo quebraria o `render.yaml` e todo `.env` que já
+existe. O aviso está no `ambiente.ts` e no `main.worker.ts`, junto do código.
+
+Não há nada que distribua a concorrência entre canais ou entre clientes: a fila
+é uma só e o pg-boss entrega por ordem de `startAfter`. O que impede um cliente
+de monopolizar o worker é o teto de contatos por planejamento e a cota diária
+por empresa (`backend/src/comum/limites-empresa.ts`) — não este número.
+
+**Subir o valor não acelera, e mexer nele sem estudar custa caro.** O handler
+percorre o lote com `await` sequencial, então o paralelismo real continua sendo
+1: só sai mais job da fila por rodada. Trocar o laço por `Promise.all` para
+ganhar vazão de verdade faria vários contatos saírem no **mesmo instante**,
+anulando o `startAfter` sorteado de cada job — e rajada simultânea é um dos
+dois padrões que mais pesam no risco de bloqueio do número (o outro é cadência
+fixa, que os intervalos aleatórios já tratam).
+
+Um worker só é decisão consciente enquanto o volume couber nele. Escalar
+horizontalmente é possível — o pg-boss distribui por advisory lock — mas exige
+revisar cada `for update skip locked` antes, não depois.
+
+## `reservarPendentes` agora tem teto
+
+Corrigido, e não por causa de memória: por causa de **isolamento entre
+clientes**. A versão antiga reservava a campanha inteira num `update ... where
+enfileirado_em is null`. Uma campanha de 200 mil contatos devolvia 200 mil ids
+e virava 400 inserts em lote numa tacada só, com o job de planejamento
+segurando a fila do começo ao fim — e enquanto isso **nenhuma outra campanha
+planejava**.
+
+A troca foi para `reservar_contatos_pendentes` (migration
+`20260822000300`), que preserva o que importava:
+
+- continua sendo **um** `UPDATE ... RETURNING` — a atomicidade é a mesma;
+- ganhou `for update skip locked` no subselect, então dois workers nem enxergam
+  as mesmas linhas;
+- `enfileirado_em is null` continua no `WHERE` do UPDATE, como segunda trava.
+
+O que fica de fora do teto sai no ciclo seguinte: `campanhas_a_replanejar` já
+roda de minuto em minuto procurando exatamente "pendente sem job".
+
+**O efeito colateral que precisou ser tratado junto:** cada planejamento
+começava o atraso em zero. Com mais de uma leva, a segunda seria agendada por
+cima da primeira e a cadência de 15–45 s viraria dois envios no mesmo instante.
+Isso **já acontecia** antes da paginação — `reconciliar_disparos` devolve
+contatos travados e o replanejamento os agendava a partir de agora, por cima
+dos que já estavam marcados. `campanhas.fila_ate` + `reservar_janela_de_envio`
+dão a cada leva o próprio trecho da linha do tempo.
+
 ## O que ficou de fora
 
 - **Observabilidade.** Os logs vão para o stdout do Render, sem correlação por
@@ -204,6 +261,12 @@ banco que já está no ar.
   declarado, não os magic bytes. O bucket é público (o servidor do WhatsApp
   precisa baixar), então todo arquivo enviado vira URL pública permanente.
 - **Backup do Supabase.** Confira o plano: no free não há PITR.
-- **Multi-tenant.** O sistema é single-tenant por decisão. Virar SaaS exige
-  `organizacao_id` em todas as tabelas e RLS por tenant — é mais fácil fazer
-  agora, com o banco vazio, do que depois.
+- **Multi-tenant.** ~~O sistema é single-tenant por decisão.~~ Deixou de ser:
+  `empresa_id` entrou em 15/08 (`20260815000200_empresas.sql`) e o RLS por
+  empresa em 22/08 (`20260822000200_isolamento_por_empresa.sql`). Continua
+  valendo o aviso central: **a API usa a service role, que tem `BYPASSRLS`** —
+  nenhuma política do banco a alcança. Para a LEITURA feita pela API, o filtro
+  em `comum/escopo.ts` é a defesa, não a segunda camada. O que de fato vale
+  para todo mundo são os triggers de coerência de empresa daquela migration, e
+  eles cobrem ESCRITA (vínculo cruzado entre campanha, canal, contato e
+  perfil), não leitura.
