@@ -129,6 +129,7 @@ export class ObservabilidadeService {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          content: linhas.join("\n"),
           text: linhas.join("\n"),
           origem,
           mensagem,

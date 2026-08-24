@@ -13,10 +13,11 @@ const envValido = {
 };
 
 /** Registra as URLs chamadas sem deixar nenhuma request sair de verdade. */
-function espionarFetch(): string[] {
+function espionarFetch(corpos: string[] = []): string[] {
   const chamadas: string[] = [];
-  vi.stubGlobal("fetch", (url: unknown) => {
+  vi.stubGlobal("fetch", async (url: unknown, init?: RequestInit) => {
     chamadas.push(String(url));
+    if (init?.body) corpos.push(String(init.body));
     return Promise.resolve(new Response(null, { status: 204 }));
   });
   return chamadas;
@@ -63,6 +64,25 @@ describe("ObservabilidadeService.relatarErro", () => {
     observabilidade.relatarErro("Worker — exceção não capturada", new Error("qualquer"));
 
     expect(chamadas).toEqual(["https://alerta.exemplo/valido"]);
+  });
+
+  it("envia content, o campo exibido pelo Discord", async () => {
+    for (const [chave, valor] of Object.entries(envValido)) vi.stubEnv(chave, valor);
+    vi.stubEnv("ALERTA_WEBHOOK_URL", "https://discord.com/api/webhooks/123/token");
+    const corpos: string[] = [];
+    espionarFetch(corpos);
+
+    const observabilidade = await servico();
+    const resultado = await observabilidade.enviarAlerta(
+      "Worker parado",
+      new Error("sem pulso"),
+      { minutos: 4 },
+    );
+
+    expect(resultado).toBe("enviado");
+    const corpo = JSON.parse(corpos[0]);
+    expect(corpo.content).toContain("Worker parado");
+    expect(corpo.content).toContain("sem pulso");
   });
 
   /** Sem webhook configurado o alerta é opcional — não pode virar erro. */
