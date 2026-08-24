@@ -31,6 +31,22 @@ const EMPRESA = "11111111-1111-1111-1111-111111111111";
 const CAMPANHA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const CANAL = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
+/**
+ * O worker lê `AGENDAMENTO_TOLERANCIA_MINUTOS` de `ambiente()`, e `ambiente()`
+ * valida o pacote INTEIRO: sem as quatro chaves obrigatórias ele lança, e a
+ * manutenção morreria aqui por falta de `.env` — não por defeito nenhum.
+ *
+ * `vi.stubEnv` e não `process.env.X =`: `process.env` é do PROCESSO e o valor
+ * escrito na mão vaza para os outros arquivos da suíte. O motivo completo está
+ * no comentário de `vitest.config.ts`, junto do defeito que ele custou.
+ */
+beforeEach(() => {
+  vi.stubEnv("SUPABASE_URL", "https://exemplo.supabase.co");
+  vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "chave-de-servico-de-teste");
+  vi.stubEnv("JWT_SECRET", "0".repeat(32));
+  vi.stubEnv("DATABASE_URL", "postgres://usuario:senha@localhost:5432/teste");
+});
+
 type Registro = Record<string, unknown>;
 type Banco = Record<string, Registro[]>;
 
@@ -41,6 +57,7 @@ interface ChamadaRpc {
 
 class ConsultaFalsa implements PromiseLike<{ data: unknown; error: null; count: number }> {
   private readonly iguais: [string, unknown][] = [];
+  private readonly pertence: [string, unknown[]][] = [];
   private operacao: { tipo: "select" | "update" | "insert"; valores?: Registro } = {
     tipo: "select",
   };
@@ -69,7 +86,14 @@ class ConsultaFalsa implements PromiseLike<{ data: unknown; error: null; count: 
     this.iguais.push([coluna, valor]);
     return this;
   }
-  in(): this {
+  /**
+   * Filtra de verdade, e não por capricho: o `update` do planejamento usa
+   * `.in("status", ...)` justamente para NÃO ressuscitar campanha expirada ou
+   * pausada. Com um `in` que devolve `this` sem olhar nada, o teste dessa
+   * proteção passaria com a proteção removida.
+   */
+  in(coluna: string, valores: unknown[]): this {
+    this.pertence.push([coluna, valores]);
     return this;
   }
   order(): this {
@@ -80,8 +104,10 @@ class ConsultaFalsa implements PromiseLike<{ data: unknown; error: null; count: 
   }
 
   private linhas(): Registro[] {
-    return (this.banco[this.tabela] ?? []).filter((l) =>
-      this.iguais.every(([coluna, valor]) => l[coluna] === valor),
+    return (this.banco[this.tabela] ?? []).filter(
+      (l) =>
+        this.iguais.every(([coluna, valor]) => l[coluna] === valor) &&
+        this.pertence.every(([coluna, valores]) => valores.includes(l[coluna])),
     );
   }
 
@@ -274,6 +300,316 @@ describe("campanha agendada continua executável (cenários B, C e D)", () => {
     await expect(disparo.manutencao()).resolves.toBeUndefined();
     // Chegou até o fim: a limpeza de cotas é a última coisa da rotina.
     expect(chamadas.some((c) => c.nome === "limpar_cotas_empresa_antigas")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// Agendamento que perdeu a hora não sai atrasado — ele falha
+// ===========================================================================
+
+describe("agendamento expirado", () => {
+  /** Canal conectado no banco: sem ele o planejamento falha por outro motivo. */
+  function comCanalConectado(banco: Banco): Banco {
+    banco.campanha_canais = [
+      {
+        campanha_id: CAMPANHA,
+        canais: {
+          id: CANAL,
+          nome: "canal",
+          numero: "+5511900000000",
+          instancia_evolution: "disparoy_x_abc",
+          tipo_conexao: "qrcode",
+          status: "conectado",
+          limite_diario: null,
+          estagio_aquecimento: 1,
+          enviadas_hoje: 0,
+          solicitado_em: "2026-01-01T00:00:00.000Z",
+          conectado_em: "2026-01-01T00:00:00.000Z",
+          meta_phone_number_id: null,
+          estado_gateway: "open",
+          estado_verificado_em: "2026-01-01T00:00:00.000Z",
+          foto_url: null,
+        },
+      },
+    ];
+    return banco;
+  }
+
+  /**
+   * Dublê de `expirar_agendamento_se_vencido`: devolve linha quando expirou,
+   * conjunto vazio quando não havia o que expirar. É o contrato do UPDATE
+   * condicional — a decisão é do banco, e o worker só lê a resposta.
+   */
+  const expirou = () => [
+    { atraso_segundos: 21_600, motivo: "O horário agendado passou há 6 h 0 min..." },
+  ];
+  const naoExpirou = () => [];
+
+  /**
+   * O defeito que motivou tudo isto: worker fora do ar na hora marcada, volta
+   * depois, e o pg-boss entrega o job com o `startAfter` já vencido — portanto
+   * na hora. Nenhuma varredura opina, porque o job existe.
+   */
+  it("campanha agendada fora da tolerância não enfileira contato nenhum", async () => {
+    const banco = comCanalConectado({
+      campanhas: [campanhaEmAndamento({ status: "agendada" })],
+      canais: [],
+    });
+    const { servico, chamadas } = supabaseFalso(banco, {
+      expirar_agendamento_se_vencido: expirou,
+      reservar_contatos_pendentes: () => [{ contato_id: 1 }],
+    });
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await disparo.planejarCampanha({ campanhaId: CAMPANHA, rodada: 0 });
+
+    expect(fila.agendarContatosEmLote).not.toHaveBeenCalled();
+    // Nem chegou a reservar: parar depois da reserva deixaria os contatos com
+    // `enfileirado_em` preenchido para jobs que nunca existiram.
+    expect(chamadas.some((c) => c.nome === "reservar_contatos_pendentes")).toBe(false);
+    expect(banco.campanhas[0].status).toBe("agendada");
+  });
+
+  /** O operador precisa saber QUAL campanha não saiu, não só que algo falhou. */
+  it("a expiração abre incidente de infra com a campanha", async () => {
+    const banco = comCanalConectado({
+      campanhas: [campanhaEmAndamento({ status: "agendada" })],
+      canais: [],
+    });
+    const { servico, chamadas } = supabaseFalso(banco, {
+      expirar_agendamento_se_vencido: expirou,
+    });
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await disparo.planejarCampanha({ campanhaId: CAMPANHA, rodada: 0 });
+
+    const incidente = chamadas.find((c) => c.nome === "abrir_incidente");
+    expect(incidente?.args.p_codigo).toBe("agendamento_expirado");
+    // `infra` e não `canal`: o horário passou porque o NOSSO processo não
+    // estava de pé, não porque o WhatsApp do cliente caiu.
+    expect(incidente?.args.p_categoria).toBe("infra");
+    expect(incidente?.args.p_campanha_id).toBe(CAMPANHA);
+  });
+
+  /** Dentro da tolerância, um atraso de minutos não pode matar a campanha. */
+  it("campanha agendada dentro da tolerância segue e enfileira", async () => {
+    const banco = comCanalConectado({
+      campanhas: [campanhaEmAndamento({ status: "agendada" })],
+      canais: [],
+    });
+    const { servico } = supabaseFalso(banco, {
+      expirar_agendamento_se_vencido: naoExpirou,
+      reservar_contatos_pendentes: () => [{ contato_id: 1 }],
+      reservar_janela_de_envio: () => new Date().toISOString(),
+    });
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await disparo.planejarCampanha({ campanhaId: CAMPANHA, rodada: 0 });
+
+    expect(fila.agendarContatosEmLote).toHaveBeenCalledTimes(1);
+    expect(banco.campanhas[0].status).toBe("em_andamento");
+  });
+
+  /**
+   * A corrida de verdade: a campanha estava `agendada` quando este worker a
+   * leu, e outro a expirou antes da promoção. O compare-and-swap do banco
+   * devolve vazio para este — ele não sabe que perdeu, e sem o
+   * `.in("status", ...)` da promoção escreveria `em_andamento` por cima do
+   * `falhou` que o outro acabou de gravar. A campanha sairia inteira, atrasada.
+   */
+  it("expiração feita por outro worker não é desfeita pela promoção", async () => {
+    const banco = comCanalConectado({
+      campanhas: [campanhaEmAndamento({ status: "agendada" })],
+      canais: [],
+    });
+    const { servico } = supabaseFalso(banco, {
+      // O outro worker chegou primeiro: gravou `falhou` e este recebe vazio.
+      expirar_agendamento_se_vencido: () => {
+        banco.campanhas[0].status = "falhou";
+        return [];
+      },
+      reservar_contatos_pendentes: () => [{ contato_id: 1 }],
+      reservar_janela_de_envio: () => new Date().toISOString(),
+    });
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await disparo.planejarCampanha({ campanhaId: CAMPANHA, rodada: 0 });
+
+    expect(banco.campanhas[0].status).toBe("falhou");
+  });
+
+  /**
+   * `falhou` é terminal: nada no produto retoma uma campanha nesse estado
+   * (`retomar` a recusa, `campanhas_a_replanejar` só olha `em_andamento`).
+   * Um replanejamento que chegasse assim mesmo — retry do pg-boss, job antigo
+   * acordando — é sempre engano.
+   */
+  it("campanha já marcada falhou não volta para em_andamento", async () => {
+    const banco = comCanalConectado({
+      campanhas: [campanhaEmAndamento({ status: "falhou" })],
+      canais: [],
+    });
+    const { servico, chamadas } = supabaseFalso(banco, {
+      expirar_agendamento_se_vencido: naoExpirou,
+      reservar_contatos_pendentes: () => [{ contato_id: 1 }],
+    });
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await disparo.planejarCampanha({ campanhaId: CAMPANHA, rodada: 0 });
+
+    expect(banco.campanhas[0].status).toBe("falhou");
+    expect(fila.agendarContatosEmLote).not.toHaveBeenCalled();
+    // Nem perguntou o horário: `falhou` já é terminal, e a RPC só existe para
+    // decidir sobre campanha que ainda está `agendada`.
+    expect(chamadas.some((c) => c.nome === "expirar_agendamento_se_vencido")).toBe(false);
+  });
+
+  /**
+   * Erro do banco no meio da conferência não pode virar "então manda".
+   *
+   * Relançar devolve o job ao retry do pg-boss com a campanha ainda
+   * `agendada`: ou a retentativa consegue perguntar e ela sai no horário, ou a
+   * tolerância passa e a varredura da manutenção a expira. Engolir o erro
+   * seria o defeito original voltando pela porta do tratamento de erro.
+   */
+  it("erro ao conferir o horário aborta o planejamento em vez de enviar", async () => {
+    const banco = comCanalConectado({
+      campanhas: [campanhaEmAndamento({ status: "agendada" })],
+      canais: [],
+    });
+    const { servico } = supabaseFalso(banco);
+    const original = servico.db.rpc.bind(servico.db);
+    (servico.db as unknown as { rpc: unknown }).rpc = async (nome: string, args: Registro = {}) =>
+      nome === "expirar_agendamento_se_vencido"
+        ? { data: null, error: { message: "sem conexão" } }
+        : original(nome, args);
+
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await expect(disparo.planejarCampanha({ campanhaId: CAMPANHA, rodada: 0 })).rejects.toThrow();
+    expect(fila.agendarContatosEmLote).not.toHaveBeenCalled();
+    expect(banco.campanhas[0].status).toBe("agendada");
+  });
+
+  /**
+   * O outro modo de falha: o job do pg-boss sumiu (retenção, fila recriada) e
+   * ninguém vai chamar `planejarCampanha` daquela campanha nunca mais. Sem a
+   * varredura ela ficaria `agendada` para sempre — sem envio e sem aviso.
+   */
+  it("a manutenção expira o que passou da tolerância antes de reenfileirar", async () => {
+    const ordem: string[] = [];
+    const { disparo, fila } = montar(
+      { campanhas: [], campanha_contatos: [], canais: [] },
+      {
+        expirar_agendamentos_vencidos: () => {
+          ordem.push("expirar");
+          return [
+            {
+              campanha_id: CAMPANHA,
+              empresa_id: EMPRESA,
+              nome: "Promoção de terça",
+              atraso_segundos: 90_000,
+              motivo: "O horário agendado passou há 1 d 1 h...",
+            },
+          ];
+        },
+        reivindicar_agendamentos_vencidos: () => {
+          ordem.push("reivindicar");
+          return [];
+        },
+      },
+    );
+
+    await disparo.manutencao();
+
+    // A ordem é o mecanismo: invertidas, a mesma rodada enfileiraria a
+    // campanha atrasada e só depois a expiraria — com o job já em voo.
+    expect(ordem).toEqual(["expirar", "reivindicar"]);
+    expect(fila.reenfileirarAgendamento).not.toHaveBeenCalled();
+  });
+
+  /** A varredura é observabilidade: falhar nela não pode derrubar o resto. */
+  it("erro ao expirar não derruba a manutenção", async () => {
+    const { servico, chamadas } = supabaseFalso({ campanhas: [], canais: [] });
+    const original = servico.db.rpc.bind(servico.db);
+    (servico.db as unknown as { rpc: unknown }).rpc = async (nome: string, args: Registro = {}) =>
+      nome === "expirar_agendamentos_vencidos"
+        ? (chamadas.push({ nome, args }), { data: null, error: { message: "sem conexão" } })
+        : original(nome, args);
+
+    const fila = filaFalsa();
+    const disparo = new DisparoService(
+      servico,
+      auditoriaFalsa,
+      {} as unknown as WhatsappService,
+      fila as unknown as FilaService,
+      new LimitesService(servico),
+    );
+
+    await expect(disparo.manutencao()).resolves.toBeUndefined();
+    // Chegou até o fim: a limpeza de cotas é a última coisa da rotina.
+    expect(chamadas.some((c) => c.nome === "limpar_cotas_empresa_antigas")).toBe(true);
+  });
+
+  /**
+   * O teto precisa chegar ao SQL: é lá, com o relógio único, que "venceu
+   * demais" é decidido. Uma reivindicação sem tolerância voltaria a
+   * reenfileirar campanha da semana passada.
+   */
+  it("a reivindicação recebe a tolerância junto da carência", async () => {
+    const { disparo, chamadas } = montar({ campanhas: [], canais: [] });
+
+    await disparo.manutencao();
+
+    const claim = chamadas.find((c) => c.nome === "reivindicar_agendamentos_vencidos");
+    expect(typeof claim?.args.p_tolerancia_minutos).toBe("number");
+    // A carência precisa caber DENTRO da tolerância, senão a segunda tentativa
+    // de reenfileirar nunca acontece: a campanha expira antes de ser retentada.
+    expect(Number(claim?.args.p_carencia_minutos)).toBeLessThan(
+      Number(claim?.args.p_tolerancia_minutos),
+    );
   });
 });
 

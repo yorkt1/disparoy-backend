@@ -129,3 +129,17 @@ services:
       # Envios simultâneos por canal. Subir demais é convite a bloqueio.
       - key: DISPARO_CONCORRENCIA_POR_CANAL
         value: "1"
+      # Quanto tempo depois da hora marcada uma campanha agendada ainda pode
+      # começar. Passado isso ela vira `falhou` e NADA é enviado.
+      #
+      # 30 min é o que atravessa um deploy ruim (o Render reinicia o worker a
+      # cada publicação) sem matar campanha nenhuma. Antes disto não havia teto:
+      # o worker voltava do reinício, a fila entregava o job com o `startAfter`
+      # já vencido, e a campanha saía horas atrasada — "promoção só hoje"
+      # chegando de madrugada no dia seguinte.
+      #
+      # Piso de 5, que é a carência de `reivindicar_agendamentos_vencidos`:
+      # abaixo disso a campanha expira antes de ganhar a segunda tentativa de
+      # ser reenfileirada.
+      - key: AGENDAMENTO_TOLERANCIA_MINUTOS
+        value: "30"

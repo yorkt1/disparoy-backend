@@ -297,11 +297,18 @@ export interface Campanha {
   metricas: MetricasCampanha;
   templatePrincipal: string | null;
   /**
-   * Por que o SISTEMA pausou, em linguagem de operador.
+   * Por que o SISTEMA parou a campanha, em linguagem de operador.
    *
-   * Preenchido só quando `status === "pausada_por_canal"`. É o texto que a
-   * faixa da tela mostra — sem ele, a campanha pararia sozinha e a tela não
-   * teria como dizer o motivo, que era exatamente o problema original.
+   * Preenchido quando `status === "pausada_por_canal"` (o canal caiu) e quando
+   * `status === "falhou"` por agendamento expirado — a hora passou e o disparo
+   * não começou. É o texto que a faixa da tela mostra; sem ele, a campanha
+   * pararia sozinha e a tela não teria como dizer o motivo, que era exatamente
+   * o problema original.
+   *
+   * O nome ficou de quando só a pausa por canal escrevia aqui. Trocá-lo
+   * custaria uma migration, o mapeador e as duas cópias de `shared/` — e a
+   * coluna significa a mesma coisa nos dois casos: "o sistema parou isto, e
+   * aqui está o porquê, em português".
    */
   pausadaMotivo: string | null;
 }
@@ -348,6 +355,15 @@ export type AcaoLog =
   | "campanha.concluida"
   /** Encerrada à força por ter ficado "em andamento" sem worker que a executasse. */
   | "campanha.abandonada"
+  /**
+   * A hora do agendamento passou e o disparo não começou dentro da tolerância.
+   *
+   * Separada de `campanha.abandonada` porque o estado é outro e a conversa com
+   * o cliente também: abandonada estava `em_andamento` e parou no meio, esta
+   * nunca saiu do lugar — nenhuma mensagem foi enviada. Quem investiga "por
+   * que o cliente não recebeu nada ontem" precisa ver a diferença.
+   */
+  | "campanha.agendamento_expirado"
   | "campanha.rascunho_salvo"
   | "midia.upload"
   | "spintax.criado"

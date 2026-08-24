@@ -44,6 +44,19 @@ create index if not exists campanhas_agendadas_vencidas_idx
   on campanhas (agendada_para)
   where status = 'agendada';
 
+-- ---------------------------------------------------------------------------
+-- `fila_ate` nasce AQUI, longe do bloco que a explica (mais abaixo).
+--
+-- Não é organização: `limpar_agendamento_da_campanha`, logo em seguida, é
+-- `language sql`, e o Postgres valida o corpo de função SQL no CREATE
+-- (`check_function_bodies` vem ligado). Criada antes da coluna existir, ela
+-- estoura 42703 e aborta a migration inteira — num banco que JÁ tem a coluna
+-- o arquivo passa, e foi assim que o defeito chegou em produção sem aparecer.
+-- As demais funções daqui são `plpgsql`, cujo corpo só é checado em execução.
+-- ---------------------------------------------------------------------------
+alter table campanhas
+  add column if not exists fila_ate timestamptz;
+
 /**
  * Campanhas agendadas cuja hora já passou, reivindicadas para reenfileirar.
  *
@@ -169,9 +182,10 @@ $$;
 -- `fila_ate` é o instante do último contato já agendado. Cada leva reserva o
 -- próprio trecho a partir dele, num UPDATE só — dois planejamentos
 -- concorrentes recebem trechos que não se sobrepõem.
+--
+-- A coluna em si é criada no topo do arquivo, antes das funções — ver lá o
+-- motivo, que é de ordem de execução e não de arrumação.
 -- ---------------------------------------------------------------------------
-alter table campanhas
-  add column if not exists fila_ate timestamptz;
 
 /**
  * Reserva `p_duracao_segundos` na linha do tempo e devolve onde ela começa.

@@ -147,6 +147,27 @@ const schema = z.object({
    */
   DISPARO_CONCORRENCIA_POR_CANAL: z.coerce.number().int().min(1).max(20).default(1),
 
+  /**
+   * Quanto tempo depois da hora marcada uma campanha agendada ainda pode
+   * começar. Passado isso ela vira `falhou` e NADA é enviado.
+   *
+   * Existe porque o contrário já aconteceu: o worker esteve fora na hora do
+   * agendamento, voltou depois, e a fila entregou o job com o `startAfter`
+   * vencido — a campanha inteira saiu horas atrasada. Mensagem de WhatsApp
+   * chega no celular de uma pessoa com hora na tela; "promoção só hoje"
+   * entregue de madrugada no dia seguinte é pior do que não entregue.
+   *
+   * O piso de 5 minutos NÃO é conservadorismo: a manutenção roda de minuto em
+   * minuto e `reivindicar_agendamentos_vencidos` espera 5 min de carência
+   * antes de tentar reenfileirar de novo. Com tolerância menor que a carência,
+   * a segunda tentativa nunca acontece — um reinício do Render no minuto errado
+   * mataria uma campanha que teria saído sozinha no minuto seguinte.
+   *
+   * Quem quiser rigor de "na hora ou não vai" põe 5. O padrão de 30 é o que
+   * atravessa um deploy ruim sem matar campanha nenhuma.
+   */
+  AGENDAMENTO_TOLERANCIA_MINUTOS: z.coerce.number().int().min(5).max(1440).default(30),
+
   // --- Observabilidade externa (opcional) ---------------------------------
   /**
    * URL que recebe um POST com JSON a cada erro não classificado (500 da API,

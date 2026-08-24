@@ -33,6 +33,28 @@ const COLUNAS_EXECUCAO =
   "id, nome, status, rodada, sequencia, iniciada_em, validar_numeros, empresa_id, " +
   "intervalo_contatos_min, intervalo_contatos_max, intervalo_mensagens_min, intervalo_mensagens_max";
 
+/**
+ * Quanto tempo uma reivindicação de agendamento vale antes de a campanha
+ * voltar a ser candidata.
+ *
+ * É a segunda chance de quem morreu entre reivindicar e enfileirar. Precisa
+ * ser MENOR que `AGENDAMENTO_TOLERANCIA_MINUTOS` — com os dois iguais, a
+ * campanha expiraria no mesmo minuto em que ganharia a retentativa, e a
+ * carência não serviria para nada. O piso de 5 minutos daquela variável existe
+ * por isto.
+ */
+const CARENCIA_AGENDAMENTO_MINUTOS = 5;
+
+/** Uma campanha que perdeu a hora, como as RPCs de expiração a devolvem. */
+interface AgendamentoExpirado {
+  campanha_id: string;
+  empresa_id: string | null;
+  nome: string;
+  atraso_segundos: number;
+  /** Texto de operador, montado no banco — ver `motivo_agendamento_expirado`. */
+  motivo: string;
+}
+
 interface LinhaExecucao {
   id: string;
   nome: string;
@@ -121,10 +143,29 @@ export class DisparoService {
       return;
     }
     if (this.rodadaVencida(job, campanha)) return;
-    if (campanha.status === "pausada" || campanha.status === "concluida") {
+    /*
+     * `falhou` entra aqui junto de `pausada` e `concluida`.
+     *
+     * É o que fecha a corrida do agendamento expirado: se outro worker acabou
+     * de expirar esta campanha, `expirarSeAgendamentoVencido` devolve `false`
+     * (o compare-and-swap no banco não casou) e sem este guarda o planejamento
+     * seguiria em frente, promoveria a `em_andamento` e enviaria — desfazendo
+     * a expiração que o outro acabou de gravar.
+     *
+     * Vale também para a falha por falta de canal: nada no produto retoma uma
+     * campanha `falhou` (`retomar` a recusa, `campanhas_a_replanejar` só olha
+     * `em_andamento`), então replanejar uma é sempre engano.
+     */
+    if (
+      campanha.status === "pausada" ||
+      campanha.status === "concluida" ||
+      campanha.status === "falhou"
+    ) {
       this.logger.log(`Campanha "${campanha.nome}" está ${campanha.status}; nada a planejar.`);
       return;
     }
+    // Antes de qualquer envio: agendamento que perdeu a hora não sai atrasado.
+    if (await this.expirarSeAgendamentoVencido(campanha)) return;
 
     const canais = await this.canaisConectadosDa(job.campanhaId);
     if (canais.length === 0) {
@@ -132,13 +173,21 @@ export class DisparoService {
       return;
     }
 
+    /*
+     * O `in` não é enfeite: entre o SELECT do topo e este UPDATE cabem uma
+     * expiração de agendamento e um clique em "pausar". Sem a lista, esta
+     * escrita ressuscitaria qualquer um dos dois — a campanha voltaria a
+     * `em_andamento` e os contatos sairiam logo abaixo, que é exatamente o
+     * envio indevido que o guarda de status acima existe para impedir.
+     */
     await this.supabase
       .tabela("campanhas")
       .update({
         status: "em_andamento",
         iniciada_em: campanha.iniciadaEm ?? new Date().toISOString(),
       })
-      .eq("id", job.campanhaId);
+      .eq("id", job.campanhaId)
+      .in("status", ["rascunho", "agendada", "em_andamento", "pausada_por_canal"]);
 
     /**
      * Reserva os pendentes num único UPDATE ... RETURNING.
@@ -577,6 +626,11 @@ export class DisparoService {
     // devolveria trabalho para uma fila que não tem por onde sair.
     await this.vigiarCanais();
     await this.reconciliarTravados();
+    // ANTES de reenfileirar, e a ordem é o mecanismo: o que já passou da
+    // tolerância vira `falhou` nesta linha e some do filtro da linha seguinte.
+    // Invertidas, a mesma rodada de manutenção enfileiraria a campanha atrasada
+    // e só depois a expiraria — com o job já em voo.
+    await this.expirarAgendamentosVencidos();
     await this.reenfileirarAgendamentosVencidos();
     await this.replanejarPendentesOrfas();
     await this.agregarMetricas();
@@ -618,7 +672,12 @@ export class DisparoService {
   private async reenfileirarAgendamentosVencidos(): Promise<void> {
     const { data, error } = await this.supabase.db.rpc("reivindicar_agendamentos_vencidos", {
       p_limite: 50,
-      p_carencia_minutos: 5,
+      p_carencia_minutos: CARENCIA_AGENDAMENTO_MINUTOS,
+      // O teto vive no SQL, junto do `agendada_para <= now()`: é o mesmo
+      // relógio que decide "já venceu" e "venceu demais". Com duas réplicas de
+      // worker, um `Date.now()` atrasado numa delas reenfileiraria o que a
+      // outra acabou de expirar.
+      p_tolerancia_minutos: ambiente().AGENDAMENTO_TOLERANCIA_MINUTOS,
     });
 
     if (error) {
@@ -633,6 +692,147 @@ export class DisparoService {
         `Campanha ${c.campanha_id} estava agendada com a hora vencida e sem job; reenfileirada.`,
       );
     }
+  }
+
+  /**
+   * Agendamento que passou da tolerância vira `falhou`. Nada é enviado.
+   *
+   * Cobre o modo de falha que o guarda do `planejarCampanha` não alcança: o
+   * job do pg-boss sumiu (retenção, fila recriada) e ninguém mais vai chamar o
+   * planejamento daquela campanha. Sem esta varredura ela ficaria `agendada`
+   * para sempre, sem envio e sem aviso — o silêncio que 20260822000300 existe
+   * para acabar, só que do outro lado.
+   *
+   * Não relança: a manutenção é a rotina que conserta o sistema, e derrubá-la
+   * por causa de uma expiração levaria o pg-boss a reagendá-la em backoff
+   * justo quando o sistema está ruim (ver `manutencao`).
+   */
+  private async expirarAgendamentosVencidos(): Promise<void> {
+    const { data, error } = await this.supabase.db.rpc("expirar_agendamentos_vencidos", {
+      p_tolerancia_minutos: ambiente().AGENDAMENTO_TOLERANCIA_MINUTOS,
+      p_limite: 50,
+    });
+
+    if (error) {
+      this.logger.error(`Não foi possível expirar agendamentos vencidos: ${error.message}`);
+      return;
+    }
+
+    const expiradas = (data ?? []) as AgendamentoExpirado[];
+    for (const c of expiradas) {
+      await this.registrarAgendamentoExpirado(
+        { id: c.campanha_id, nome: c.nome, empresaId: c.empresa_id },
+        c,
+      );
+    }
+  }
+
+  /**
+   * O guarda do planejamento. `true` quando expirou e não há nada a enviar.
+   *
+   * Este é o caminho que disparou atrasado em produção: a campanha estava
+   * `agendada` para T, o worker esteve fora em T, e o pg-boss entregou o job
+   * assim que ele voltou — com o `startAfter` já vencido, portanto na hora. A
+   * varredura da manutenção não chega a opinar quando o job existe.
+   *
+   * Quem decide é o banco, num UPDATE condicional: `Date.now()` deste processo
+   * não serve para uma decisão que duas réplicas precisam tomar igual.
+   *
+   * ERRO NA RPC NÃO LIBERA O ENVIO. Relança, e o pg-boss retenta o
+   * planejamento (3 tentativas, com backoff). A campanha continua `agendada`:
+   * ou a retentativa consegue perguntar e ela sai no horário, ou a tolerância
+   * passa e a varredura da manutenção a expira. Devolver `false` aqui seria
+   * transformar um soluço do banco em disparo fora de hora — o defeito
+   * original, de volta pela porta do tratamento de erro.
+   */
+  private async expirarSeAgendamentoVencido(campanha: CampanhaEmExecucao): Promise<boolean> {
+    if (campanha.status !== "agendada") return false;
+
+    const { data, error } = await this.supabase.db.rpc("expirar_agendamento_se_vencido", {
+      p_campanha_id: campanha.id,
+      p_tolerancia_minutos: ambiente().AGENDAMENTO_TOLERANCIA_MINUTOS,
+    });
+    if (error) {
+      throw new Error(
+        `Não foi possível conferir o horário do agendamento da campanha ${campanha.id}: ` +
+          `${error.message}`,
+      );
+    }
+
+    /*
+     * Conjunto vazio = dentro da tolerância, ou outro worker expirou primeiro.
+     * Linha = esta chamada foi quem expirou, e só ela registra o rastro.
+     *
+     * As duas formas são aceitas de propósito. `returns table` chega como array
+     * pelo PostgREST, mas a alternativa de errar aqui não é simétrica: ler uma
+     * linha como "vazio" devolve `false` e a campanha SAI atrasada, que é o
+     * defeito inteiro de volta. Reconhecer o objeto solto custa uma linha.
+     */
+    const linha = Array.isArray(data) ? data[0] : data;
+    const expirada =
+      linha && typeof linha === "object" && "atraso_segundos" in linha
+        ? (linha as Omit<AgendamentoExpirado, "campanha_id" | "empresa_id" | "nome">)
+        : null;
+    if (!expirada) return false;
+
+    await this.registrarAgendamentoExpirado(campanha, expirada);
+    return true;
+  }
+
+  /**
+   * Deixa rastro da campanha que perdeu a hora, nos dois lugares que importam.
+   *
+   * A auditoria é por campanha e por empresa: é onde o operador descobre QUAL
+   * campanha não saiu. O incidente é o estado "algo está quebrado agora" — e
+   * ele colapsa todas as expirações numa linha só, porque `abrir_incidente`
+   * chaveia por `(categoria, codigo, canal_id)` e este não tem canal. É o
+   * mesmo anti-avalanche de `limite_empresa_atingido`, e é o comportamento
+   * certo aqui: dez campanhas expiradas na volta de um worker que passou a
+   * noite fora são UM problema, não dez.
+   *
+   * Categoria `infra` porque a culpa é nossa: o horário passou porque o nosso
+   * processo não estava de pé, não porque o WhatsApp do cliente caiu. É a
+   * distinção que `docs/ARQUITETURA-ATRIBUICAO-DE-FALHA.md` inteira defende.
+   */
+  private async registrarAgendamentoExpirado(
+    campanha: { id: string; nome: string; empresaId: string | null },
+    expirada: { atraso_segundos: number; motivo: string },
+  ): Promise<void> {
+    // O texto vem do banco, não daqui: é o mesmo que está gravado em
+    // `pausada_motivo` e que o operador lê na tela. Formatá-lo de novo em
+    // TypeScript faria log e tela contarem versões diferentes do mesmo evento.
+    this.logger.error(
+      `Campanha "${campanha.nome}" (${campanha.id}) marcada como falhou. ${expirada.motivo}`,
+    );
+
+    const { error } = await this.supabase.db.rpc("abrir_incidente", {
+      p_categoria: "infra",
+      p_codigo: "agendamento_expirado",
+      p_titulo: "Campanha agendada não saiu no horário",
+      p_canal_id: null,
+      p_campanha_id: campanha.id,
+      p_detalhe: `"${campanha.nome}": ${expirada.motivo}`,
+    });
+    if (error) {
+      this.logger.error(`Falha ao registrar incidente de agendamento expirado: ${error.message}`);
+    }
+
+    await this.auditoria.registrar({
+      usuarioId: null,
+      usuarioNome: "Sistema",
+      acao: "campanha.agendamento_expirado",
+      tipoEntidade: "campanha",
+      entidadeId: campanha.id,
+      entidadeRotulo: campanha.nome,
+      // Explícito: não há usuário para consultar em `perfis` num evento de
+      // sistema, e sem isto o log ficaria sem dono — invisível para o admin da
+      // empresa, visível só para a conta global. Ver `marcarFalha`.
+      empresaId: campanha.empresaId,
+      detalhes: {
+        atrasoSegundos: expirada.atraso_segundos,
+        toleranciaMinutos: ambiente().AGENDAMENTO_TOLERANCIA_MINUTOS,
+      },
+    });
   }
 
   /** Histórico de cota por empresa — 180 dias. Ver `limparAvisosAntigos`. */
