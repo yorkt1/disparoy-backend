@@ -18,7 +18,8 @@ const envBase = {
   EVOLUTION_WEBHOOK_SECRET: "1234567890abcdef",
   APP_URL_PUBLICA: "",
   GROQ_API_KEY: "",
-  GROQ_MODELO: "llama-3.3-70b-versatile",
+  // Vazio = o gerador escolhe o modelo sozinho. Ver `spintax/gerador.ts`.
+  GROQ_MODELO: "",
   META_WHATSAPP_TOKEN: "",
   META_WHATSAPP_BUSINESS_ACCOUNT_ID: "",
   META_GRAPH_API_VERSION: "v21.0",

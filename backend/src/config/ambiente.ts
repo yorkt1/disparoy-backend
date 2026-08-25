@@ -6,8 +6,6 @@ import { z } from "zod";
  * Falhar aqui é de propósito: é muito melhor a API não subir do que descobrir
  * uma credencial faltando no meio de um disparo de 20 mil contatos.
  */
-/** Modelo de uso geral da Groq, quando o .env não escolhe outro. */
-const MODELO_GROQ_PADRAO = "llama-3.3-70b-versatile";
 
 /** Origem do Vite em desenvolvimento, quando o .env não lista outras. */
 const ORIGENS_PADRAO = "http://localhost:5173";
@@ -103,18 +101,23 @@ const schema = z.object({
    */
   GROQ_API_KEY: z.string().optional(),
   /**
-   * Configurável porque o catálogo da Groq muda rápido: modelo desativado vira
-   * um valor no .env, não um deploy.
+   * PINO do modelo. Vazio — que é o padrão — significa "escolha sozinho".
    *
-   * `GROQ_MODELO=` vazio cai no padrão em vez de recusar o boot — é um estado
-   * comum demais no .env para derrubar a API inteira por causa de um recurso
-   * opcional.
+   * Antes isto tinha um padrão fixo no código, e o padrão apodreceu: a Groq
+   * desligou `llama-3.3-70b-versatile` em 16/08/2026 e o botão "Gerar
+   * variações" passou a responder 422 até alguém editar o `.env`. O catálogo
+   * dela muda rápido demais para um nome escrito à mão em qualquer lugar.
+   *
+   * Quem escolhe agora é `resolverModelo` (`spintax/gerador.ts`), perguntando à
+   * própria Groq o que existe na conta. Preencher esta variável desliga essa
+   * escolha e força o valor — serve para prender uma versão específica quando o
+   * texto gerado importa mais que o modelo estar atual.
+   *
+   * Continua sem recusar o boot quando vem lixo: geração de variações é
+   * recurso opcional, e derrubar a API inteira por causa dela seria trocar um
+   * botão quebrado por um sistema fora do ar.
    */
-  GROQ_MODELO: z
-    .string()
-    .trim()
-    .default(MODELO_GROQ_PADRAO)
-    .transform((v) => v || MODELO_GROQ_PADRAO),
+  GROQ_MODELO: z.string().trim().default(""),
 
   // --- Meta Cloud API (opcional) ------------------------------------------
   META_WHATSAPP_TOKEN: z.string().optional(),
