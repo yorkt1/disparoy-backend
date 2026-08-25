@@ -280,6 +280,44 @@ describe("escolha do modelo da Groq", () => {
   });
 
   /**
+   * O caso real de 25/08/2026: `GROQ_MODELO=llama-3.1-8b-instant` ficou setado
+   * na variável de ambiente da API, e esse modelo a Groq desligou na mesma data
+   * do outro. O painel mostrava só "The model ... does not exist" — verdade
+   * inútil: nada na frase dizia que havia um pino, onde ele estava, nem que
+   * apagá-lo resolvia.
+   *
+   * Recusar continua certo (pino é pino). Este teste garante que recusar venha
+   * com o endereço do problema junto.
+   */
+  it("pino morto diz ONDE mexer, não só que o modelo não existe", async () => {
+    vi.stubEnv("GROQ_MODELO", "llama-3.1-8b-instant");
+    fingirFetch({
+      chat: () =>
+        respostaErro(
+          404,
+          "The model `llama-3.1-8b-instant` does not exist or you do not have access to it.",
+          "model_not_found",
+        ),
+    });
+
+    const { gerarVariacoes } = await gerador();
+    // `then` com os dois braços, e não `.catch`: com `catch` o tipo vira
+    // `string[] | Error` e `.message` não compila. O braço de sucesso devolve
+    // `null` para o `toBeNull` abaixo reprovar se a geração NÃO falhar.
+    const erro = await gerarVariacoes("texto original", 2).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+
+    expect(erro).not.toBeNull();
+    // O que a Groq disse continua lá: é o que identifica a causa.
+    expect(erro?.message).toContain("llama-3.1-8b-instant");
+    // E o que fazer a respeito, que é o que faltava.
+    expect(erro?.message).toContain("GROQ_MODELO");
+    expect(erro?.message).toContain("Apague");
+  });
+
+  /**
    * Uma consulta por clique dobraria a latência de um botão que o operador
    * espera olhando. O catálogo da Groq muda em semanas, não entre dois cliques.
    */

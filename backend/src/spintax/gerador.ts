@@ -388,7 +388,33 @@ export async function gerarVariacoes(texto: string, quantidade: number): Promise
     // A Groq devolve o motivo em `error.message` — chave inválida, modelo
     // desativado, limite estourado. Repassar evita o "erro inesperado" que
     // não ajuda ninguém a corrigir.
-    throw new ErroGerador(corpo.error?.message ?? `Groq respondeu HTTP ${status}.`, String(status));
+    const daGroq = corpo.error?.message ?? `Groq respondeu HTTP ${status}.`;
+
+    /*
+     * Pino apontando para modelo morto: some o "e o que eu faço agora?".
+     *
+     * Sem este acréscimo, a tela mostra só "The model X does not exist" — que é
+     * verdade e não ajuda. Quem lê não tem como saber que existe um pino, que
+     * ele está numa variável de ambiente do Render (não no código, não no
+     * banco), nem que APAGAR essa variável faz o sistema se resolver sozinho.
+     *
+     * Aconteceu de verdade: com `GROQ_MODELO=llama-3.1-8b-instant` no Render, o
+     * botão respondia 422 com a frase da Groq e nada apontava para a variável.
+     * A escolha de não trocar o modelo sozinho continua certa — ignorar um pino
+     * explícito em silêncio seria pior —, mas ela obriga a mensagem a dizer
+     * onde mexer.
+     */
+    if (env.GROQ_MODELO && pareceModeloMorto(status, corpo.error)) {
+      throw new ErroGerador(
+        `${daGroq} O modelo está PRESO em GROQ_MODELO="${env.GROQ_MODELO}" ` +
+          `(variável de ambiente da API). Apague o valor dessa variável para o ` +
+          `sistema escolher sozinho um modelo que a Groq ainda atenda, ou troque ` +
+          `por um nome válido de console.groq.com/docs/models.`,
+        "gerador_modelo_pinado_morto",
+      );
+    }
+
+    throw new ErroGerador(daGroq, String(status));
   }
 
   const conteudo = corpo.choices?.[0]?.message?.content;

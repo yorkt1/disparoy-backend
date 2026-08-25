@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Ambiente mínimo que PASSA na validação — guarda o caminho normal, para a
@@ -27,6 +27,25 @@ async function servico() {
   const { ObservabilidadeService } = await import("./observabilidade.service.js");
   return new ObservabilidadeService();
 }
+
+/**
+ * O reset ANTES, e não só depois.
+ *
+ * O `afterEach` abaixo já existia e cuida de não sujar os outros arquivos.
+ * Faltava o contrário: estes testes dependem de `config/ambiente.ts` chegar
+ * NÃO avaliado, porque o primeiro deles precisa que `ambiente()` lance. Um
+ * módulo já carregado por qualquer arquivo anterior no mesmo worker traz o
+ * `cache` do topo dele preenchido, `ambiente()` para de lançar, o `catch` que
+ * lê `process.env.ALERTA_WEBHOOK_URL` nunca roda e o teste vê lista vazia.
+ *
+ * Isso apareceu como falha intermitente: uma reprovação a cada dez execuções da
+ * suíte, sempre aqui, sempre sem relação com o que tinha mudado. Limpar só na
+ * saída deixa a proteção na mão de TODO arquivo futuro lembrar de fazer o
+ * mesmo; limpar na entrada torna este arquivo imune a quem rodou antes.
+ */
+beforeEach(() => {
+  vi.resetModules();
+});
 
 afterEach(() => {
   vi.resetModules();
