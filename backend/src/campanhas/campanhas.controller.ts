@@ -3,12 +3,20 @@ import {
   Controller,
   Get,
   HttpCode,
+  Patch,
+  Delete,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
 } from "@nestjs/common";
-import { campanhaEntradaSchema, type CampanhaEntrada, type StatusCampanha } from "@disparoy/dominio";
+import {
+  campanhaEdicaoSchema,
+  campanhaEntradaSchema,
+  type CampanhaEdicao,
+  type CampanhaEntrada,
+  type StatusCampanha,
+} from "@disparoy/dominio";
 import { IpOrigem, Usuario } from "../auth/usuario.decorator";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { ValidacaoZodPipe } from "../comum/validacao.pipe";
@@ -55,6 +63,26 @@ export class CampanhasController {
     @IpOrigem() ip: string,
   ) {
     return { campanha: await this.campanhas.criar(usuario, corpo, ip) };
+  }
+
+  @Patch(":id")
+  async editar(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Body(new ValidacaoZodPipe(campanhaEdicaoSchema)) corpo: CampanhaEdicao,
+    @IpOrigem() ip: string,
+  ) {
+    return { campanha: await this.campanhas.editar(usuario, id, corpo, ip) };
+  }
+
+  @Delete(":id")
+  @HttpCode(200)
+  async excluir(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+  ) {
+    return { excluido: await this.campanhas.excluir(usuario, id, ip) };
   }
 
   @Post(":id/pausar")

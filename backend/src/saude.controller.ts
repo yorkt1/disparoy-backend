@@ -1,4 +1,4 @@
-import { Controller, Get } from "@nestjs/common";
+import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
 import { SkipThrottle } from "@nestjs/throttler";
 import { Publico } from "./auth/publico.decorator";
 import { Usuario } from "./auth/usuario.decorator";
@@ -46,7 +46,11 @@ export class SaudeController {
   @SkipThrottle()
   async saude() {
     const { error } = await this.supabase.tabela("perfis").select("id").limit(1);
-    return { ok: !error, banco: error ? "indisponivel" : "ok" };
+    if (error) {
+      throw new ServiceUnavailableException({ ok: false, banco: "indisponivel" });
+    }
+
+    return { ok: true, banco: "ok" };
   }
 
   /** Dados da sessão para o topo do painel. */

@@ -365,6 +365,8 @@ export type AcaoLog =
    */
   | "campanha.agendamento_expirado"
   | "campanha.rascunho_salvo"
+  | "campanha.editada"
+  | "campanha.excluida"
   | "midia.upload"
   | "spintax.criado"
   | "spintax.excluido"

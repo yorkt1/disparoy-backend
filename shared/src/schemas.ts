@@ -161,6 +161,22 @@ export const campanhaEntradaSchema = z
 
 export type CampanhaEntrada = z.infer<typeof campanhaEntradaSchema>;
 
+export const campanhaEdicaoSchema = z.object({
+  nome: z.string().trim().min(3).max(LIMITES.maxCaracteresNomeCampanha).optional(),
+  canaisIds: z.array(z.string().uuid()).min(1, "Selecione ao menos um canal.").optional(),
+  sequencia: z
+    .array(mensagemSequenciaSchema)
+    .min(1, "A sequência precisa de ao menos uma mensagem.")
+    .max(LIMITES.maxMensagensPorContato)
+    .optional(),
+  intervaloEntreContatos: intervaloSchema.optional(),
+  intervaloEntreMensagens: intervaloSchema.optional(),
+  validarNumeros: z.boolean().optional(),
+  agendadaPara: z.string().datetime({ offset: true }).nullable().optional(),
+});
+
+export type CampanhaEdicao = z.infer<typeof campanhaEdicaoSchema>;
+
 // --------------------------------------------------------------------------
 // Spintax, canais, templates, usuários
 // --------------------------------------------------------------------------

@@ -95,7 +95,7 @@ export function tipoDaExtensao(extensao: string): keyof typeof MIDIA_ACEITA | nu
   return null;
 }
 
-export const INTERVALO_PADRAO_ENTRE_CONTATOS = { minSegundos: 15, maxSegundos: 45 };
+export const INTERVALO_PADRAO_ENTRE_CONTATOS = { minSegundos: 90, maxSegundos: 240 };
 export const INTERVALO_PADRAO_ENTRE_MENSAGENS = { minSegundos: 3, maxSegundos: 9 };
 
 /**

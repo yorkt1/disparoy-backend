@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import type {
   Campanha,
+  CampanhaEdicao,
   CampanhaEntrada,
   ContatoDaCampanha,
   MetricasDashboard,
@@ -360,6 +361,107 @@ export class CampanhasService {
     });
 
     return paraResumoCampanha((await this.linha(id))!);
+  }
+
+  async editar(
+    usuario: UsuarioAutenticado,
+    id: string,
+    dados: CampanhaEdicao,
+    ip: string,
+  ): Promise<ResumoCampanha> {
+    const campanha = await this.obter(usuario, id);
+    const canaisMudaram =
+      dados.canaisIds !== undefined &&
+      [...dados.canaisIds].sort().join(",") !== [...campanha.canaisIds].sort().join(",");
+    if (canaisMudaram) await this.exigirCanaisProntos(usuario, dados.canaisIds!);
+
+    const ativa = campanha.status === "em_andamento" || campanha.status === "agendada";
+    const agendamento = dados.agendadaPara !== undefined ? dados.agendadaPara : campanha.agendadaPara;
+    if (ativa) {
+      await this.supabase.db.rpc("invalidar_rodada_campanha", { p_campanha_id: id });
+      await this.supabase.db.rpc("limpar_agendamento_da_campanha", { p_campanha_id: id });
+    }
+
+    const atualizacao: Record<string, unknown> = {};
+    if (dados.nome !== undefined) atualizacao.nome = dados.nome;
+    if (dados.sequencia !== undefined) {
+      atualizacao.sequencia = dados.sequencia;
+      atualizacao.template_principal = dados.sequencia[0]?.templateId ?? null;
+    }
+    if (dados.intervaloEntreContatos) {
+      atualizacao.intervalo_contatos_min = dados.intervaloEntreContatos.minSegundos;
+      atualizacao.intervalo_contatos_max = dados.intervaloEntreContatos.maxSegundos;
+    }
+    if (dados.intervaloEntreMensagens) {
+      atualizacao.intervalo_mensagens_min = dados.intervaloEntreMensagens.minSegundos;
+      atualizacao.intervalo_mensagens_max = dados.intervaloEntreMensagens.maxSegundos;
+    }
+    if (dados.validarNumeros !== undefined) atualizacao.validar_numeros = dados.validarNumeros;
+    if (dados.agendadaPara !== undefined) {
+      atualizacao.agendada_para = dados.agendadaPara;
+      atualizacao.status = dados.agendadaPara ? "agendada" : "em_andamento";
+      atualizacao.iniciada_em = dados.agendadaPara
+        ? null
+        : campanha.iniciadaEm ?? new Date().toISOString();
+    }
+
+    if (Object.keys(atualizacao).length > 0) {
+      const { error } = await noEscopo(
+        this.supabase.tabela("campanhas").update(atualizacao).eq("id", id),
+        usuario,
+      );
+      if (error) throw new Error(`Falha ao editar campanha: ${error.message}`);
+    }
+
+    if (dados.canaisIds) {
+      const { error: erroRemover } = await this.supabase
+        .tabela("campanha_canais")
+        .delete()
+        .eq("campanha_id", id);
+      if (erroRemover) throw new Error(`Falha ao atualizar canais: ${erroRemover.message}`);
+      await this.vincularCanais(id, dados.canaisIds);
+    }
+
+    if (ativa) {
+      await this.fila.agendarCampanha({ campanhaId: id, rodada: await this.rodadaAtual(id) }, agendamento);
+    }
+
+    await this.auditoria.registrar({
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      acao: "campanha.editada",
+      tipoEntidade: "campanha",
+      entidadeId: id,
+      entidadeRotulo: dados.nome ?? campanha.nome,
+      ip,
+      detalhes: { campos: Object.keys(dados) },
+    });
+
+    return paraResumoCampanha((await this.linha(id))!);
+  }
+
+  async excluir(usuario: UsuarioAutenticado, id: string, ip: string): Promise<string> {
+    const campanha = await this.obter(usuario, id);
+    const ativa = campanha.status === "em_andamento" || campanha.status === "agendada";
+    if (ativa) await this.supabase.db.rpc("invalidar_rodada_campanha", { p_campanha_id: id });
+
+    await this.auditoria.registrar({
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      acao: "campanha.excluida",
+      tipoEntidade: "campanha",
+      entidadeId: id,
+      entidadeRotulo: campanha.nome,
+      ip,
+      detalhes: { status: campanha.status },
+    });
+
+    const { error } = await noEscopo(
+      this.supabase.tabela("campanhas").delete().eq("id", id),
+      usuario,
+    );
+    if (error) throw new Error(`Falha ao excluir campanha: ${error.message}`);
+    return id;
   }
 
   /** Retoma de onde parou: os contatos já enviados continuam marcados. */
