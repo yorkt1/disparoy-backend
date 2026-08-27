@@ -155,7 +155,7 @@ export class EvolutionService {
 
   async processar(payload: PayloadEvolution, eventoId: number | null): Promise<void> {
     try {
-      switch (payload.event) {
+      switch (normalizarNomeDoEvento(payload.event)) {
         case "CONNECTION_UPDATE":
           await this.atualizarConexao(payload);
           break;
@@ -594,6 +594,21 @@ function chaveDoEvento(payload: PayloadEvolution): string | null {
 
   const status = String(payload.data?.status ?? "");
   return `${payload.instance ?? ""}|${payload.event ?? ""}|${idMensagem}|${status}`;
+}
+
+/**
+ * `payload.event` para o formato que o `switch` de `processar` espera.
+ *
+ * A EVOLUTION_EVENTS_LOWERCASE (ou versão do gateway) manda `messages.upsert`,
+ * `messages.update`, `send.message` — minúsculo, com ponto — em vez do
+ * `MESSAGES_UPSERT` que o resto deste arquivo usa. Sem normalizar, o `switch`
+ * nunca casava nenhum case e caía sempre no `default`: nenhuma resposta era
+ * registrada, nenhuma leitura marcada, e como nada lançava exceção o evento
+ * ainda era gravado como `processado = true, erro = null` — o defeito não
+ * deixava rastro nenhum em `eventos_webhook` para apontar a causa.
+ */
+export function normalizarNomeDoEvento(bruto: string | undefined): string {
+  return (bruto ?? "").toUpperCase().replace(/\./g, "_");
 }
 
 /** "5511987654321@s.whatsapp.net" -> "+5511987654321". Grupos são ignorados. */
