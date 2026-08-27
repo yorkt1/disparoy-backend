@@ -1253,8 +1253,9 @@ export class DisparoService {
   }
 
   /**
-   * Expurgo de `mensagens_enviadas` — chamado pela fila `retencao`, uma vez
-   * por dia, não pela `manutencao` de minuto em minuto.
+   * Expurgo de `mensagens_enviadas` E `respostas_recebidas` — chamado pela
+   * fila `retencao`, uma vez por dia, não pela `manutencao` de minuto em
+   * minuto.
    *
    * Só apaga de campanha `concluida`/`falhou`: uma pausada pode retomar, e a
    * retomada lê `passo` desta mesma tabela para saber onde parou (ver
@@ -1270,7 +1271,11 @@ export class DisparoService {
       return;
     }
     if (typeof data === "number" && data > 0) {
-      this.logger.log(`${data} mensagem(ns) com mais de ${dias} dias removidas.`);
+      // "linha(s)" e não "mensagem(ns)": o número soma as duas tabelas desde
+      // que `respostas_recebidas` entrou no expurgo, e um log que diz
+      // "mensagens" faria alguém procurar no lugar errado durante uma auditoria
+      // de retenção.
+      this.logger.log(`${data} linha(s) com mais de ${dias} dias removidas.`);
     }
   }
 

@@ -76,6 +76,12 @@ alter table respostas_recebidas enable row level security;
 -- `p_id_externo` repetido não conta de novo: o `on conflict` não insere, e sem
 -- linha nova o total da campanha não sobe pela reentrega.
 -- ---------------------------------------------------------------------------
+-- As DUAS assinaturas antigas, e não só a atual: se este banco estiver num
+-- ponto em que a 20260822000100 não passou, a versão de um argumento ainda
+-- existe, e deixá-la viva recria a sobrecarga que aquela migration derrubou —
+-- o PostgREST escolheria pela lista de argumentos e a chamada do webhook
+-- poderia cair na função que não guarda texto nenhum.
+drop function if exists registrar_resposta(text);
 drop function if exists registrar_resposta(text, uuid);
 
 create or replace function registrar_resposta(
