@@ -308,11 +308,17 @@ export function paraCampanha(l: LinhaCampanha): Campanha {
   return { ...base(l), sequencia: sequenciaDe(l) };
 }
 
+export const COLUNAS_CONTATO_CAMPANHA =
+  "id, contato_id, telefone, status, situacao, lida_em, respostas, motivo, variaveis, contatos(nome)";
+
 export interface LinhaContatoCampanha {
   id: number;
   contato_id: string;
   telefone: string;
   status: ContatoDaCampanha["status"];
+  situacao: ContatoDaCampanha["situacao"];
+  lida_em: string | null;
+  respostas: number | null;
   motivo: string | null;
   variaveis: unknown;
   contatos?: { nome: string | null } | null;
@@ -325,6 +331,12 @@ export function paraContatoDaCampanha(l: LinhaContatoCampanha): ContatoDaCampanh
     nome: l.contatos?.nome ?? null,
     telefone: l.telefone,
     status: l.status,
+    // `?? "pendente"` cobre a linha lida antes da migration `20260826000200`
+    // ter rodado: sem ele a tela recebe `undefined` e quebra no selo, o que é
+    // muito pior do que mostrar um contato como pendente por um deploy.
+    situacao: l.situacao ?? "pendente",
+    lidaEm: iso(l.lida_em),
+    respostas: l.respostas ?? 0,
     motivo: l.motivo,
     variaveis: variaveis(l.variaveis),
   };

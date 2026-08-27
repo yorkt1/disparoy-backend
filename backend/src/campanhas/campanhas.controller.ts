@@ -17,6 +17,7 @@ import {
   campanhaEntradaSchema,
   type CampanhaEdicao,
   type CampanhaEntrada,
+  type SituacaoContato,
   type StatusCampanha,
 } from "@disparoy/dominio";
 import { IpOrigem, Usuario } from "../auth/usuario.decorator";
@@ -56,6 +57,31 @@ export class CampanhasController {
       this.campanhas.amostraDeContatos(usuario, id),
     ]);
     return { campanha, contatos };
+  }
+
+  /**
+   * Os contatos da campanha, com filtro por situação.
+   *
+   * Separada de `GET /campanhas/:id` de propósito: aquela rota carrega a tela
+   * inteira e é repetida a cada 10 s enquanto a campanha roda. Esta muda de
+   * página e de filtro por conta própria, e juntá-las faria trocar de filtro
+   * recarregar métrica, gráfico e sequência.
+   */
+  @Get(":id/contatos")
+  contatos(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Query("pagina") pagina?: string,
+    @Query("porPagina") porPagina?: string,
+    @Query("situacao") situacao?: string,
+    @Query("busca") busca?: string,
+  ) {
+    return this.campanhas.contatosDaCampanha(usuario, id, {
+      pagina: pagina ? Number(pagina) : undefined,
+      porPagina: porPagina ? Number(porPagina) : undefined,
+      situacao: situacao as SituacaoContato | "todas" | undefined,
+      busca,
+    });
   }
 
   @Post()

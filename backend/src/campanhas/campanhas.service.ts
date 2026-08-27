@@ -7,6 +7,8 @@ import type {
   MetricasDashboard,
   Paginado,
   ResumoCampanha,
+  ResumoSituacao,
+  SituacaoContato,
   StatusCampanha,
 } from "@disparoy/dominio";
 import { percentual, slugify } from "@disparoy/dominio";
@@ -20,6 +22,7 @@ import {
   paraContatoDaCampanha,
   paraResumoCampanha,
   variaveis,
+  COLUNAS_CONTATO_CAMPANHA,
   type LinhaCampanha,
   type LinhaContatoCampanha,
 } from "../comum/mapeadores";
@@ -34,6 +37,13 @@ import {
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 import { LimitesService } from "../comum/limites.service";
+
+export interface ConsultaContatos {
+  pagina?: number;
+  porPagina?: number;
+  situacao?: SituacaoContato | "todas";
+  busca?: string;
+}
 
 export interface ConsultaCampanhas {
   pagina?: number;
@@ -150,12 +160,72 @@ export class CampanhasService {
 
     const { data } = await this.supabase
       .tabela("campanha_contatos")
-      .select("id, contato_id, telefone, status, motivo, variaveis, contatos(nome)")
+      .select(COLUNAS_CONTATO_CAMPANHA)
       .eq("campanha_id", id)
       .order("id")
       .limit(limite);
 
     return ((data ?? []) as unknown as LinhaContatoCampanha[]).map(paraContatoDaCampanha);
+  }
+
+  /**
+   * Os contatos da campanha, paginados e filtráveis por situação.
+   *
+   * É a tela que responde "quem respondeu?" — pergunta que o painel não sabia
+   * responder: ele mostrava o TOTAL de respostas e uma amostra de telefones
+   * sem estado nenhum. Quem disparava e recebia resposta não via nada mudar.
+   *
+   * O filtro vai ao banco em vez de ao navegador porque a campanha tem dezenas
+   * de milhares de linhas, e o `situacao` é coluna gerada justamente para que
+   * filtro e contagem usem a mesma regra que a lista mostra.
+   *
+   * O resumo vem junto na mesma resposta: são os números dos próprios botões
+   * de filtro, e buscá-los numa segunda chamada faria a contagem piscar
+   * desatualizada ao lado da lista já trocada.
+   */
+  async contatosDaCampanha(
+    usuario: UsuarioAutenticado,
+    id: string,
+    q: ConsultaContatos = {},
+  ): Promise<Paginado<ContatoDaCampanha> & { resumo: ResumoSituacao }> {
+    // O escopo vem daqui: `campanha_contatos` não tem `empresa_id`, e nem
+    // deve — o dono é a campanha, e `obter` lança para campanha de outra.
+    await this.obter(usuario, id);
+
+    const pagina = Math.max(q.pagina ?? 1, 1);
+    const porPagina = Math.min(Math.max(q.porPagina ?? 25, 5), 100);
+    const de = (pagina - 1) * porPagina;
+
+    let consulta = this.supabase
+      .tabela("campanha_contatos")
+      .select(COLUNAS_CONTATO_CAMPANHA, { count: "exact" })
+      .eq("campanha_id", id)
+      .order("id")
+      .range(de, de + porPagina - 1);
+
+    if (q.situacao && q.situacao !== "todas") consulta = consulta.eq("situacao", q.situacao);
+    // Só telefone: o nome mora em `contatos`, e filtrar por coluna de tabela
+    // embutida no PostgREST vira `inner join` implícito que descarta silen-
+    // ciosamente todo contato sem cadastro — que é a maioria desde que o
+    // público passou a ser efêmero.
+    if (q.busca) consulta = consulta.ilike("telefone", `%${q.busca.replace(/\D/g, "")}%`);
+
+    const { data, error, count } = await consulta;
+    if (error) throw new Error(`Falha ao listar contatos da campanha: ${error.message}`);
+
+    const { data: resumo } = await this.supabase.db.rpc("resumo_situacao_campanha", {
+      p_campanha_id: id,
+    });
+
+    const total = count ?? 0;
+    return {
+      itens: ((data ?? []) as unknown as LinhaContatoCampanha[]).map(paraContatoDaCampanha),
+      pagina,
+      porPagina,
+      total,
+      totalPaginas: Math.max(Math.ceil(total / porPagina), 1),
+      resumo: (resumo ?? {}) as ResumoSituacao,
+    };
   }
 
   /**

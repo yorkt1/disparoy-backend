@@ -354,11 +354,16 @@ export class EvolutionService {
 
     const { data } = await this.supabase
       .tabela("mensagens_enviadas")
-      .select("id, campanha_id, status")
+      .select("id, campanha_id, campanha_contato_id, status")
       .eq("id_externo", idExterno)
       .maybeSingle();
 
-    const linha = data as { id: number; campanha_id: string; status: string } | null;
+    const linha = data as {
+      id: number;
+      campanha_id: string;
+      campanha_contato_id: number;
+      status: string;
+    } | null;
     if (!linha) return;
 
     if (!avancaStatus(linha.status, novo)) return;
@@ -373,6 +378,8 @@ export class EvolutionService {
       })
       .eq("id", linha.id);
 
+    if (novo === "lida") await this.marcarContatoLido(linha.campanha_contato_id, agora);
+
     /**
      * Os contadores da campanha NÃO são recalculados aqui.
      *
@@ -386,6 +393,28 @@ export class EvolutionService {
      * todas as campanhas ativas de uma vez. O painel atrasa até 60 s; o banco
      * deixa de ser o gargalo do disparo.
      */
+  }
+
+  /**
+   * Carimba no CONTATO a primeira leitura confirmada.
+   *
+   * A informação já está em `mensagens_enviadas`, mas ali ela custa um
+   * agrupamento por contato toda vez que a tela abre. Aqui ela fica ao lado da
+   * linha que a tela lê, e é o que faz a coluna gerada `situacao` sair de
+   * "enviado" para "lido".
+   *
+   * `is null` na condição: guarda a PRIMEIRA leitura. Sem isso, cada passo
+   * lido da sequência empurraria a data para frente, e o contato que leu a
+   * mensagem 1 às 9h apareceria como lido às 9h05 porque leu a 3 também.
+   */
+  private async marcarContatoLido(contatoId: number, quando: string): Promise<void> {
+    const { error } = await this.supabase
+      .tabela("campanha_contatos")
+      .update({ lida_em: quando })
+      .eq("id", contatoId)
+      .is("lida_em", null);
+
+    if (error) this.logger.warn(`Não foi possível marcar leitura do contato: ${error.message}`);
   }
 
   /**

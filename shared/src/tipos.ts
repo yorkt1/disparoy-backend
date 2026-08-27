@@ -320,15 +320,44 @@ export type ResumoCampanha = Omit<Campanha, "sequencia"> & {
 };
 
 /** Amostra de contato exibida no detalhe da campanha. */
+/**
+ * Até onde este contato chegou na campanha.
+ *
+ * É uma escada, não um conjunto de rótulos soltos: cada degrau implica os
+ * anteriores, e o valor é sempre o ponto mais avançado alcançado. É o que
+ * permite a tela ter um filtro por vez em vez de três caixinhas combinadas.
+ *
+ * **A regra NÃO mora aqui.** Ela é a coluna gerada `campanha_contatos.situacao`
+ * (migration `20260826000200`), porque filtrar e contar 20 mil contatos só
+ * acontece no banco — uma segunda cópia em TypeScript seria a que diverge e
+ * faz o total do filtro não bater com a lista embaixo dele. Este tipo existe
+ * para o painel saber o que pode chegar; quem decide é o Postgres.
+ *
+ *  - `pendente`  — ainda não saiu (inclui validando e enviando)
+ *  - `falhou`    — não chegou (falha, número inválido, bloqueado)
+ *  - `enviado`   — saiu, sem confirmação de leitura
+ *  - `lido`      — leu e não respondeu
+ *  - `respondeu` — respondeu, com ou sem recibo de leitura
+ */
+export type SituacaoContato = "pendente" | "falhou" | "enviado" | "lido" | "respondeu";
+
 export interface ContatoDaCampanha {
   id: number;
   contatoId: string;
   nome: string | null;
   telefone: string;
   status: StatusContatoCampanha;
+  situacao: SituacaoContato;
+  /** Primeira leitura confirmada pelo WhatsApp. `null` enquanto não houve. */
+  lidaEm: string | null;
+  /** Quantas mensagens o contato mandou de volta. */
+  respostas: number;
   motivo: string | null;
   variaveis: Record<string, string>;
 }
+
+/** Quantos contatos há em cada situação. Ausente quer dizer zero. */
+export type ResumoSituacao = Partial<Record<SituacaoContato, number>>;
 
 // --------------------------------------------------------------------------
 // Mensagens e webhooks
