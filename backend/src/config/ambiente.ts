@@ -246,6 +246,60 @@ const schema = z.object({
         "os webhooks. Sem ele a instância sobe sem webhook nenhum.",
     );
 
+    /**
+     * Existir não basta: precisa ser alcançável DE FORA.
+     *
+     * `z.string().url()` aceita `http://localhost:3333` sem reclamar, e foi
+     * exatamente esse valor que ficou meses em produção. A API subia sem erro,
+     * o painel funcionava, as campanhas saíam — e a Evolution passava o dia
+     * tentando entregar evento no localhost da VPS DELA. Nenhuma entrega,
+     * nenhuma leitura e nenhuma resposta jamais chegou, e nada em lugar nenhum
+     * dizia por quê.
+     *
+     * É a pior classe de defeito que este sistema pode ter: silencioso,
+     * permanente, e indistinguível de "o WhatsApp do cliente não respondeu".
+     * O único momento em que dá para pegá-lo de graça é aqui, no boot — depois
+     * disso ninguém liga uma coisa na outra até alguém reclamar.
+     *
+     * Recusar o boot é proporcional: uma API no ar sem webhook é pior do que
+     * uma API que não sobe, porque a primeira parece que está funcionando.
+     */
+    const publica = v.APP_URL_PUBLICA?.trim();
+    if (publica) {
+      const alvo = (() => {
+        try {
+          return new URL(publica).hostname.toLowerCase();
+        } catch {
+          return null;
+        }
+      })();
+
+      // Loopback, link-local e as três faixas privadas da RFC 1918: tudo que
+      // só resolve de dentro da própria máquina ou da própria rede.
+      const inalcancavel =
+        alvo !== null &&
+        (alvo === "localhost" ||
+          alvo === "0.0.0.0" ||
+          alvo.endsWith(".local") ||
+          /^127\./.test(alvo) ||
+          /^10\./.test(alvo) ||
+          /^192\.168\./.test(alvo) ||
+          /^169\.254\./.test(alvo) ||
+          /^172\.(1[6-9]|2\d|3[01])\./.test(alvo));
+
+      if (inalcancavel) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["APP_URL_PUBLICA"],
+          message:
+            `"${publica}" não é alcançável pela internet, e é a Evolution — que roda ` +
+            "em outra máquina — que precisa chegar até aqui. Com um endereço destes a " +
+            "API sobe normalmente e NENHUMA entrega, leitura ou resposta é registrada, " +
+            "sem erro em lugar nenhum. Use a URL pública desta API.",
+        });
+      }
+    }
+
     if (v.FILA_OPCIONAL) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

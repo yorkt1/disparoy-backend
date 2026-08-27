@@ -61,3 +61,51 @@ describe("origemPermitida", () => {
     expect(origemPermitida("https://malicioso.com")).toBe(false);
   });
 });
+
+/**
+ * A URL pública precisa ser alcançável DE FORA, e não só existir.
+ *
+ * `http://localhost:3333` passou meses em produção neste sistema: a API subia
+ * sem erro, o painel funcionava, as campanhas saíam — e a Evolution, que roda
+ * em outra máquina, tentava entregar cada evento no localhost dela mesma.
+ * Nenhuma entrega, leitura ou resposta foi registrada nesse período, e nada
+ * apontava para a causa. O boot é o único lugar em que isso é barato de pegar.
+ */
+describe("APP_URL_PUBLICA em produção", () => {
+  const producao = (url: string) => {
+    for (const [chave, valor] of Object.entries({
+      ...envBase,
+      NODE_ENV: "production",
+      EVOLUTION_API_URL: "https://evolution.example.com",
+      EVOLUTION_API_KEY: "chave-da-evolution-123456",
+      APP_URL_PUBLICA: url,
+    })) {
+      vi.stubEnv(chave, valor);
+    }
+  };
+
+  const carregar = async () => {
+    const { ambiente } = await import("./ambiente.js");
+    return ambiente();
+  };
+
+  it("aceita a URL pública de verdade", async () => {
+    producao("https://disparoy-backend.onrender.com");
+    await expect(carregar()).resolves.toBeDefined();
+  });
+
+  it("recusa localhost", async () => {
+    producao("http://localhost:3333");
+    await expect(carregar()).rejects.toThrow(/alcançável/i);
+  });
+
+  it("recusa endereço de rede privada", async () => {
+    producao("http://192.168.0.10:3333");
+    await expect(carregar()).rejects.toThrow(/alcançável/i);
+  });
+
+  it("recusa loopback por IP", async () => {
+    producao("http://127.0.0.1:3333");
+    await expect(carregar()).rejects.toThrow(/alcançável/i);
+  });
+});
