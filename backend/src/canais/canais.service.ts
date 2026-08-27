@@ -19,14 +19,12 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { WhatsappService } from "../whatsapp/whatsapp.service";
 import {
-  conferirWebhook,
   contatosDaInstancia,
   esquecerAgenda,
   estadoDaInstancia,
   excluirInstancia,
   fotoDaInstancia,
   numeroDaInstancia,
-  registrarWebhook,
 } from "../whatsapp/evolution-provider";
 import { gerarPlanilhaContatos } from "../contatos/planilha";
 import { BUCKET_MIDIA } from "../midia/midia.service";
@@ -353,64 +351,6 @@ export class CanaisService {
 
     if (error) throw new Error(`Falha ao verificar o canal: ${error.message}`);
     return { canal: paraCanal(data as unknown as LinhaCanal), confirmado: true };
-  }
-
-  /**
-   * Reaponta o webhook deste canal para a API atual.
-   *
-   * Existe por causa de uma falha silenciosa e PERMANENTE: o webhook é gravado
-   * na instância da Evolution, e só no momento do pareamento. Um canal pareado
-   * antes de `APP_URL_PUBLICA` existir — ou com um `EVOLUTION_WEBHOOK_SECRET`
-   * que mudou depois, ou apontando para uma URL de API antiga — envia
-   * mensagens perfeitamente e nunca reporta nada de volta. Nenhum deploy nosso
-   * conserta isso, porque o que está errado mora do lado de lá.
-   *
-   * O sintoma é cruel de diagnosticar: o disparo funciona, a pessoa responde
-   * no WhatsApp, e o painel jura que ela não leu. Sem este reparo a única saída
-   * era reparear o canal e escanear o QR de novo — derrubando a sessão de um
-   * cliente para consertar um problema de configuração nosso.
-   *
-   * Devolve o que estava configurado ANTES, e não só o resultado: quando o
-   * reparo não resolve, é o `antes` que diz por quê — uma URL apontando para
-   * outro lugar é uma história diferente de webhook nenhum.
-   */
-  async repararWebhook(
-    usuario: UsuarioAutenticado,
-    id: string,
-    ip: string,
-  ): Promise<{ antes: string | null; reparado: boolean; aviso: string | null }> {
-    const canal = await this.obter(usuario, id);
-
-    if (canal.tipoConexao !== "qrcode") {
-      throw new BadRequestException("Só canais de QR Code têm webhook na Evolution.");
-    }
-
-    const antes = await conferirWebhook(canal.instanciaEvolution);
-    const aviso = await registrarWebhook(canal.instanciaEvolution);
-
-    await this.auditoria.registrar({
-      usuarioId: usuario.id,
-      usuarioNome: usuario.nome,
-      acao: "canal.webhook_reparado",
-      tipoEntidade: "canal",
-      entidadeId: id,
-      entidadeRotulo: rotular(canal),
-      ip,
-      detalhes: {
-        urlAnterior: antes?.url ?? null,
-        estavaAtivo: antes?.ativo ?? false,
-        resultado: aviso ?? "ok",
-      },
-    });
-
-    return {
-      // `ativo: false` conta como "não havia": um webhook desligado reporta
-      // tanto quanto webhook nenhum, e distinguir os dois na tela só daria ao
-      // operador uma diferença sem consequência.
-      antes: antes?.ativo ? antes.url : null,
-      reparado: aviso === null,
-      aviso,
-    };
   }
 
   /**

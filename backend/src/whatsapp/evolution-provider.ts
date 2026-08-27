@@ -37,7 +37,6 @@ const CAMINHOS = {
   desconectar: (i: string) => `instance/logout/${i}`,
   excluir: (i: string) => `instance/delete/${i}`,
   definirWebhook: (i: string) => `webhook/set/${i}`,
-  buscarWebhook: (i: string) => `webhook/find/${i}`,
   enviarTexto: (i: string) => `message/sendText/${i}`,
   enviarMidia: (i: string) => `message/sendMedia/${i}`,
   verificarNumeros: (i: string) => `chat/whatsappNumbers/${i}`,
@@ -191,7 +190,7 @@ async function chamar<T>(caminho: string, init: RequestInit = {}): Promise<T> {
  * nenhum — nem entrega, nem desconexão. O comentário logo acima afirmava que
  * isso não podia acontecer, e o código permitia que acontecesse.
  */
-export async function registrarWebhook(instancia: string): Promise<string | null> {
+async function registrarWebhook(instancia: string): Promise<string | null> {
   const env = ambiente();
 
   if (!env.APP_URL_PUBLICA || !env.EVOLUTION_WEBHOOK_SECRET) {
@@ -217,51 +216,6 @@ export async function registrarWebhook(instancia: string): Promise<string | null
   } catch (e) {
     const detalhe = e instanceof Error ? e.message : String(e);
     return `Não foi possível registrar o webhook (${detalhe}). O canal não vai reportar status.`;
-  }
-}
-
-export interface WebhookDaInstancia {
-  ativo: boolean;
-  url: string | null;
-  eventos: string[];
-}
-
-/**
- * O que a Evolution diz que está configurado para esta instância.
- *
- * Existe para responder à pergunta que ninguém conseguia responder sem abrir a
- * VPS: "por que este canal envia e nunca reporta nada?". O webhook é gravado
- * na INSTÂNCIA, do lado da Evolution — não no nosso banco e não no nosso
- * código. Um canal pareado antes de `APP_URL_PUBLICA` existir fica assim para
- * sempre, e nenhum deploy nosso muda isso.
- *
- * Devolve `null` quando a pergunta não pôde ser feita, que é diferente de
- * "não há webhook" pelo mesmo motivo que `indisponivel` é diferente de
- * `close`: um é problema nosso, o outro é um fato sobre o canal.
- */
-export async function conferirWebhook(instancia: string): Promise<WebhookDaInstancia | null> {
-  try {
-    const r = await chamar<{
-      enabled?: boolean;
-      url?: string;
-      events?: string[];
-      webhook?: { enabled?: boolean; url?: string; events?: string[] };
-    }>(CAMINHOS.buscarWebhook(instancia));
-
-    // A Evolution responde ora com o objeto direto, ora embrulhado em
-    // `webhook` — muda com a versão, e as duas formas aparecem em produção.
-    const w = r.webhook ?? r;
-    return {
-      ativo: w.enabled === true,
-      url: w.url?.trim() || null,
-      eventos: Array.isArray(w.events) ? w.events : [],
-    };
-  } catch {
-    // 404 é a resposta da Evolution para instância SEM webhook — e é
-    // indistinguível de instância inexistente pelo status. Quem chama trata
-    // `null` como "não deu para saber" e segue para o registro, que é a ação
-    // certa nos dois casos.
-    return null;
   }
 }
 
