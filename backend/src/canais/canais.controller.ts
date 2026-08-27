@@ -72,6 +72,22 @@ export class CanaisController {
     return this.canais.verificar(usuario, id);
   }
 
+  /**
+   * Reaponta o webhook do canal para a API atual.
+   *
+   * `@Post` e não `@Patch`: não edita o canal, dispara uma ação contra o
+   * gateway — o mesmo lugar de `verificar` e `reconectar`.
+   */
+  @Post(":id/reparar-webhook")
+  @HttpCode(200)
+  repararWebhook(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+  ) {
+    return this.canais.repararWebhook(usuario, id, ip);
+  }
+
   @Patch(":id")
   async ajustar(
     @Usuario() usuario: UsuarioAutenticado,

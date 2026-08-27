@@ -410,6 +410,14 @@ export type AcaoLog =
   | "canal.conectado"
   | "canal.desconectado"
   | "canal.excluido"
+  /**
+   * Webhook do canal reapontado para a API atual.
+   *
+   * Vale auditar porque o sintoma que ele corrige é indistinguível de defeito
+   * do sistema: o canal envia e nunca reporta. Saber QUANDO alguém reparou é o
+   * que separa "sempre esteve quebrado" de "quebrou de novo depois disso".
+   */
+  | "canal.webhook_reparado"
   | "template.criado"
   | "template.sincronizado"
   | "contatos.importados"
