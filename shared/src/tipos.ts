@@ -367,6 +367,13 @@ export type AcaoLog =
   | "campanha.rascunho_salvo"
   | "campanha.editada"
   | "campanha.excluida"
+  /**
+   * Relatório da campanha baixado em CSV — exportação de dado pessoal.
+   *
+   * Registrado pelo mesmo motivo que `contatos.extraidos`, e com um agravante:
+   * a planilha leva o TEXTO que os contatos responderam, não só o telefone.
+   */
+  | "campanha.relatorio_exportado"
   | "midia.upload"
   | "spintax.criado"
   | "spintax.excluido"

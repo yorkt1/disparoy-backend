@@ -4,6 +4,10 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { ObservabilidadeService } from "../observabilidade/observabilidade.service";
 import { numeroDaInstancia } from "../whatsapp/evolution-provider";
 import { ContatosService } from "../contatos/contatos.service";
+// O tipo mora com o relatório porque é lá que ele vira coluna. Uma união
+// copiada nos dois lados diverge, e a que divergir grava um `tipo` que o
+// `check` da tabela recusa — em produção, dentro de um webhook.
+import type { TipoResposta } from "../campanhas/relatorio";
 
 /**
  * Processamento dos eventos da Evolution API.
@@ -13,6 +17,20 @@ import { ContatosService } from "../contatos/contatos.service";
  * lento vira uma tempestade de duplicatas.
  */
 
+/**
+ * Corpo de uma mensagem recebida. Só os campos de texto são nomeados; os de
+ * mídia entram pelo índice.
+ *
+ * O WhatsApp tem dezenas de tipos de mensagem e a lista cresce sozinha —
+ * declarar todos aqui seria manter um espelho de um protocolo de terceiro que
+ * ninguém vai atualizar. `conteudoDaMensagem` sabe os que interessam.
+ */
+interface MensagemEvolution {
+  conversation?: string;
+  extendedTextMessage?: { text?: string };
+  [k: string]: unknown;
+}
+
 /** Formato dos eventos que consumimos. Campos extras são ignorados. */
 interface PayloadEvolution {
   event?: string;
@@ -20,7 +38,8 @@ interface PayloadEvolution {
   data?: {
     key?: { id?: string; remoteJid?: string; fromMe?: boolean };
     status?: string;
-    message?: { conversation?: string; extendedTextMessage?: { text?: string } };
+    message?: MensagemEvolution;
+    messageTimestamp?: number | string;
     state?: string;
     qrcode?: { base64?: string };
     base64?: string;
@@ -372,9 +391,17 @@ export class EvolutionService {
   /**
    * Mensagem recebida do contato.
    *
-   * Serve a dois propósitos: contar respostas e — o que importa juridicamente —
-   * detectar pedido de saída. Marcar o opt-out aqui é o que garante que a
-   * próxima campanha não alcance quem pediu para sair.
+   * Serve a três propósitos: guardar a resposta para o relatório, contar
+   * respostas e — o que importa juridicamente — detectar pedido de saída.
+   * Marcar o opt-out aqui é o que garante que a próxima campanha não alcance
+   * quem pediu para sair.
+   *
+   * O que este método NÃO faz é confirmar leitura. Receber o evento é passivo:
+   * o read receipt só sai da Evolution por `chat/markMessageAsRead` ou pelo
+   * `readMessages` das settings da instância, e nenhum dos dois é acionado em
+   * lugar nenhum do sistema. É o que mantém a notificação viva no celular do
+   * cliente enquanto o operador lê a mesma resposta pelo painel — se um dia
+   * alguém ligar qualquer um dos dois, some.
    */
   private async tratarMensagemRecebida(payload: PayloadEvolution): Promise<void> {
     const chave = payload.data?.key;
@@ -384,16 +411,24 @@ export class EvolutionService {
     const telefone = jidParaTelefone(chave.remoteJid);
     if (!telefone) return;
 
-    const texto =
-      payload.data?.message?.conversation ??
-      payload.data?.message?.extendedTextMessage?.text ??
-      "";
+    const conteudo = conteudoDaMensagem(payload.data?.message);
+    // Evento de protocolo (mensagem apagada, chave de sessão): chega pelo
+    // MESSAGES_UPSERT como qualquer outra, e não é resposta de ninguém.
+    // Contá-la inflava a taxa de resposta da campanha com o WhatsApp
+    // conversando consigo mesmo.
+    if (!conteudo) return;
+    const { texto, tipo } = conteudo;
 
     // A empresa vem da instância que RECEBEU a mensagem. Sem ela, a resposta
     // era creditada à campanha mais recente que falou com aquele número em
     // qualquer empresa — ver a migration `20260818000100`.
     const canal = await this.canalDaInstancia(payload.instance);
-    await this.contarResposta(telefone, canal?.empresa_id ?? null);
+    await this.contarResposta(telefone, canal?.empresa_id ?? null, {
+      texto,
+      tipo,
+      idExterno: chave.id ?? null,
+      recebidaEm: horaDoEvento(payload.data?.messageTimestamp),
+    });
 
     if (ehPedidoDeSaida(texto)) {
       const registrado = await this.contatos.registrarOptOut(
@@ -421,13 +456,93 @@ export class EvolutionService {
    * não o raro. Dentro da função o incremento é relativo à coluna, então o
    * Postgres serializa e nada se perde.
    */
-  private async contarResposta(telefone: string, empresaId: string | null): Promise<void> {
+  private async contarResposta(
+    telefone: string,
+    empresaId: string | null,
+    conteudo: { texto: string; tipo: TipoResposta; idExterno: string | null; recebidaEm: string },
+  ): Promise<void> {
     const { error } = await this.supabase.db.rpc("registrar_resposta", {
       p_telefone: telefone,
       p_empresa_id: empresaId,
+      p_texto: conteudo.texto,
+      p_tipo: conteudo.tipo,
+      p_id_externo: conteudo.idExterno,
+      p_recebida_em: conteudo.recebidaEm,
     });
-    if (error) this.logger.warn(`Não foi possível contar a resposta: ${error.message}`);
+    if (error) this.logger.warn(`Não foi possível registrar a resposta: ${error.message}`);
   }
+}
+
+/**
+ * O que o contato respondeu, na forma que o relatório precisa.
+ *
+ * Antes só `conversation` e `extendedTextMessage` eram lidos, e tudo o mais
+ * virava string vazia — áudio e figurinha, que são metade das respostas de uma
+ * campanha em massa, apareciam como se ninguém tivesse respondido. Agora a
+ * mídia vira `tipo`, e o relatório mostra "[áudio]" em vez de célula em branco.
+ *
+ * A legenda da mídia entra como texto porque é texto que a pessoa escreveu:
+ * quem manda foto com "pode me ligar" embaixo respondeu "pode me ligar".
+ */
+export function conteudoDaMensagem(
+  mensagem: MensagemEvolution | undefined,
+): { texto: string; tipo: TipoResposta } | null {
+  const m = (mensagem ?? {}) as Record<string, { caption?: string; text?: string } | undefined>;
+
+  const texto = (mensagem?.conversation ?? mensagem?.extendedTextMessage?.text ?? "").trim();
+  if (texto) return { texto, tipo: "texto" };
+
+  // Reação: o emoji É a resposta, e é o que a planilha deve mostrar. Cair no
+  // "[mensagem]" genérico apagaria a única informação que ela carrega — e num
+  // disparo o 🙏 de volta é resposta tanto quanto "obrigado".
+  const reacao = m.reactionMessage?.text?.trim();
+  if (reacao) return { texto: reacao, tipo: "texto" };
+
+  const midias: [string, TipoResposta][] = [
+    ["imageMessage", "imagem"],
+    ["audioMessage", "audio"],
+    ["pttMessage", "audio"],
+    ["videoMessage", "video"],
+    ["documentMessage", "documento"],
+    ["stickerMessage", "figurinha"],
+  ];
+
+  for (const [campo, tipo] of midias) {
+    const conteudo = m[campo];
+    if (conteudo) return { texto: (conteudo.caption ?? "").trim(), tipo };
+  }
+
+  // O que o WhatsApp manda sozinho, sem ninguém ter digitado nada: apagar uma
+  // mensagem, rodar chave de sessão, anexar contexto. Chega como MESSAGES_UPSERT
+  // igual a uma resposta de verdade, e é isso que faz `null` importar aqui.
+  const PROTOCOLO = [
+    "protocolMessage",
+    "senderKeyDistributionMessage",
+    "messageContextInfo",
+    "reactionMessage",
+  ];
+  const proprias = Object.keys(m).filter((k) => !PROTOCOLO.includes(k));
+  if (proprias.length === 0) return null;
+
+  // Localização, contato, enquete: existe resposta, e o relatório precisa
+  // dizer isso. "" com tipo "texto" seria indistinguível de silêncio.
+  return { texto: "", tipo: "outro" };
+}
+
+/**
+ * Quando a mensagem chegou, segundo o WhatsApp — não segundo o nosso relógio.
+ *
+ * `messageTimestamp` vem em segundos. Importa quando o webhook atrasa (fila da
+ * Evolution acumulada, réplica reiniciando): usar `now()` nesse caso embaralha
+ * a ORDEM das respostas, e a ordem é o que decide qual vai em `resposta_1`.
+ * Sem o campo, `now()` é a única resposta possível e é melhor que nada.
+ */
+export function horaDoEvento(bruto: unknown): string {
+  const segundos = typeof bruto === "string" ? Number(bruto) : bruto;
+  if (typeof segundos !== "number" || !Number.isFinite(segundos) || segundos <= 0) {
+    return new Date().toISOString();
+  }
+  return new Date(segundos * 1000).toISOString();
 }
 
 /**

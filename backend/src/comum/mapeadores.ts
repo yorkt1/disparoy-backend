@@ -28,7 +28,7 @@ function textos(bruto: unknown): string[] {
   return Array.isArray(bruto) ? bruto.map(String) : [];
 }
 
-function variaveis(bruto: unknown): Record<string, string> {
+export function variaveis(bruto: unknown): Record<string, string> {
   if (!bruto || typeof bruto !== "object" || Array.isArray(bruto)) return {};
   return Object.fromEntries(
     Object.entries(bruto as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]),

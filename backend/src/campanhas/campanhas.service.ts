@@ -9,7 +9,7 @@ import type {
   ResumoCampanha,
   StatusCampanha,
 } from "@disparoy/dominio";
-import { percentual } from "@disparoy/dominio";
+import { percentual, slugify } from "@disparoy/dominio";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { CanaisService } from "../canais/canais.service";
@@ -19,9 +19,18 @@ import {
   paraCampanha,
   paraContatoDaCampanha,
   paraResumoCampanha,
+  variaveis,
   type LinhaCampanha,
   type LinhaContatoCampanha,
 } from "../comum/mapeadores";
+import {
+  chavesDeVariaveis,
+  montarCsv,
+  MAX_RESPOSTAS,
+  type LinhaRelatorio,
+  type RespostaDoContato,
+  type TipoResposta,
+} from "./relatorio";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { empresaParaEscrita, noEscopo } from "../comum/escopo";
 import { LimitesService } from "../comum/limites.service";
@@ -31,6 +40,43 @@ export interface ConsultaCampanhas {
   porPagina?: number;
   busca?: string;
   status?: StatusCampanha | "todas";
+}
+
+/**
+ * Tamanho da página do relatório.
+ *
+ * Mil é o teto do PostgREST: pedir mais devolve mil e não avisa, e uma
+ * exportação silenciosamente truncada é o pior defeito possível numa planilha
+ * que o operador vai usar para cobrar o próprio cliente.
+ */
+const PAGINA_RELATORIO = 1000;
+
+interface LinhaContatoRelatorio {
+  id: number;
+  telefone: string;
+  status: string;
+  motivo: string | null;
+  variaveis: unknown;
+  canal_id: string | null;
+  contatos?: { nome: string | null } | null;
+}
+
+interface LinhaEnvio {
+  campanha_contato_id: number;
+  enviada_em: string | null;
+  lida_em: string | null;
+}
+
+interface LinhaResposta {
+  campanha_contato_id: number;
+  texto: string | null;
+  tipo: TipoResposta;
+}
+
+/** O que sobra de todas as mensagens de um contato depois de dobradas. */
+interface EnvioResumido {
+  primeiro: string | null;
+  lida: boolean;
 }
 
 @Injectable()
@@ -110,6 +156,207 @@ export class CampanhasService {
       .limit(limite);
 
     return ((data ?? []) as unknown as LinhaContatoCampanha[]).map(paraContatoDaCampanha);
+  }
+
+  /**
+   * O relatório da campanha: uma linha por contato, com o que ele respondeu.
+   *
+   * É a única tela do produto que mostra o TEXTO da resposta, e mostrá-lo não
+   * custa a notificação do celular do cliente: o painel só lê o que o webhook
+   * gravou, e nada em nenhum caminho chama `chat/markMessageAsRead`. Ver o
+   * comentário em `tratarMensagemRecebida`.
+   *
+   * Auditado como o download da agenda em `canais.service`, e pelo mesmo
+   * motivo: é EXPORTAÇÃO DE DADO PESSOAL em massa, agora com o agravante de
+   * levar junto o que os contatos escreveram. Quem baixou o quê, e quando, é a
+   * pergunta que aparece depois.
+   *
+   * O arquivo inteiro é montado em memória. Campanha de dezenas de milhares de
+   * contatos dá alguns MB de texto, o que a réplica aguenta; o que não caberia
+   * é uma campanha de milhões, e nesse dia isto vira streaming.
+   */
+  async relatorio(
+    usuario: UsuarioAutenticado,
+    id: string,
+    ip: string,
+  ): Promise<{ arquivo: string; nome: string; total: number }> {
+    const campanha = await this.obter(usuario, id);
+
+    // Em série, e não `Promise.all`: as três consultas varrem a mesma campanha
+    // e disparar as três de uma vez triplica o pico no banco sem encurtar nada
+    // que o operador perceba — ele já está esperando um download.
+    const contatos = await this.contatosDoRelatorio(id);
+    const envios = await this.enviosPorContato(id);
+    const respostas = await this.respostasPorContato(id);
+    const canais = await this.canaisDoRelatorio(usuario, contatos);
+
+    const linhas: LinhaRelatorio[] = contatos.map((c) => {
+      const envio = envios.get(c.id);
+      const canal = c.canal_id ? canais.get(c.canal_id) : undefined;
+      return {
+        envio: envio?.primeiro ?? null,
+        canalNome: canal?.nome ?? null,
+        canalNumero: canal?.numero ?? null,
+        nome: c.contatos?.nome ?? null,
+        telefone: c.telefone,
+        lida: envio?.lida ?? false,
+        respostas: respostas.get(c.id) ?? [],
+        status: c.status,
+        motivo: c.motivo,
+        variaveis: variaveis(c.variaveis),
+      };
+    });
+
+    await this.auditoria.registrar({
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      acao: "campanha.relatorio_exportado",
+      tipoEntidade: "campanha",
+      entidadeId: id,
+      entidadeRotulo: campanha.nome,
+      ip,
+      detalhes: { contatos: linhas.length },
+    });
+
+    const dia = new Date().toISOString().slice(0, 10);
+    return {
+      arquivo: montarCsv(linhas, chavesDeVariaveis(linhas)),
+      nome: `relatorio-${slugify(campanha.nome)}-${dia}.csv`,
+      total: linhas.length,
+    };
+  }
+
+  /**
+   * Todos os contatos da campanha, e não a amostra de 50.
+   *
+   * Paginado porque o PostgREST corta em 1000 linhas por resposta e não avisa:
+   * sem isto, a campanha de 20 mil contatos exportaria as primeiras mil e o
+   * operador não teria como saber que faltaram 19 mil.
+   */
+  private async contatosDoRelatorio(id: string): Promise<LinhaContatoRelatorio[]> {
+    const tudo: LinhaContatoRelatorio[] = [];
+
+    for (let de = 0; ; de += PAGINA_RELATORIO) {
+      const { data, error } = await this.supabase
+        .tabela("campanha_contatos")
+        .select("id, telefone, status, motivo, variaveis, canal_id, contatos(nome)")
+        .eq("campanha_id", id)
+        .order("id")
+        .range(de, de + PAGINA_RELATORIO - 1);
+
+      if (error) throw new Error(`Falha ao ler os contatos da campanha: ${error.message}`);
+      const lote = (data ?? []) as unknown as LinhaContatoRelatorio[];
+      tudo.push(...lote);
+      if (lote.length < PAGINA_RELATORIO) return tudo;
+    }
+  }
+
+  /**
+   * Primeiro envio e leitura, por contato.
+   *
+   * Dobrado por página em vez de acumulado: a campanha tem uma linha de
+   * `mensagens_enviadas` por PASSO da sequência por contato, então 20 mil
+   * contatos numa sequência de 5 são 100 mil linhas — e o que sobra delas são
+   * dois campos por contato.
+   *
+   * "Lida" é qualquer passo lido, não o último: quem leu a primeira mensagem
+   * leu a campanha, e exigir leitura do passo final marcaria como não lida
+   * toda campanha que o contato interrompeu respondendo.
+   */
+  private async enviosPorContato(id: string): Promise<Map<number, EnvioResumido>> {
+    const porContato = new Map<number, EnvioResumido>();
+
+    for (let de = 0; ; de += PAGINA_RELATORIO) {
+      const { data, error } = await this.supabase
+        .tabela("mensagens_enviadas")
+        .select("campanha_contato_id, enviada_em, lida_em")
+        .eq("campanha_id", id)
+        .order("id")
+        .range(de, de + PAGINA_RELATORIO - 1);
+
+      if (error) throw new Error(`Falha ao ler as mensagens da campanha: ${error.message}`);
+      const lote = (data ?? []) as unknown as LinhaEnvio[];
+
+      for (const linha of lote) {
+        const atual = porContato.get(linha.campanha_contato_id);
+        const primeiro =
+          atual?.primeiro && (!linha.enviada_em || atual.primeiro <= linha.enviada_em)
+            ? atual.primeiro
+            : linha.enviada_em;
+
+        porContato.set(linha.campanha_contato_id, {
+          primeiro: primeiro ?? null,
+          lida: (atual?.lida ?? false) || linha.lida_em !== null,
+        });
+      }
+
+      if (lote.length < PAGINA_RELATORIO) return porContato;
+    }
+  }
+
+  /** As respostas de cada contato, em ordem de chegada, cortadas em `MAX_RESPOSTAS`. */
+  private async respostasPorContato(id: string): Promise<Map<number, RespostaDoContato[]>> {
+    const porContato = new Map<number, RespostaDoContato[]>();
+
+    for (let de = 0; ; de += PAGINA_RELATORIO) {
+      const { data, error } = await this.supabase
+        .tabela("respostas_recebidas")
+        .select("campanha_contato_id, texto, tipo")
+        .eq("campanha_id", id)
+        // `id` desempata: duas respostas no mesmo segundo têm o mesmo
+        // `recebida_em` (o WhatsApp manda o timestamp em segundos), e sem
+        // critério estável a ordem muda a cada download.
+        .order("recebida_em")
+        .order("id")
+        .range(de, de + PAGINA_RELATORIO - 1);
+
+      if (error) throw new Error(`Falha ao ler as respostas da campanha: ${error.message}`);
+      const lote = (data ?? []) as unknown as LinhaResposta[];
+
+      for (const linha of lote) {
+        const lista = porContato.get(linha.campanha_contato_id) ?? [];
+        // Corta aqui, e não no fim: quem respondeu 200 vezes não deve ocupar
+        // 200 posições de memória para ter 195 descartadas na montagem.
+        if (lista.length >= MAX_RESPOSTAS) continue;
+        lista.push({ texto: linha.texto ?? "", tipo: linha.tipo });
+        porContato.set(linha.campanha_contato_id, lista);
+      }
+
+      if (lote.length < PAGINA_RELATORIO) return porContato;
+    }
+  }
+
+  /**
+   * Nome e número dos canais que aparecem na planilha.
+   *
+   * Sai dos contatos e não de `campanha.canaisIds` porque o canal pode ter
+   * sido tirado da campanha depois do disparo — e a coluna `conexao` precisa
+   * dizer de qual número a mensagem REALMENTE saiu, não de quais poderia ter
+   * saído hoje.
+   */
+  private async canaisDoRelatorio(
+    usuario: UsuarioAutenticado,
+    contatos: LinhaContatoRelatorio[],
+  ): Promise<Map<string, { nome: string; numero: string | null }>> {
+    const ids = [...new Set(contatos.map((c) => c.canal_id).filter((c): c is string => !!c))];
+    if (ids.length === 0) return new Map();
+
+    // Escopada mesmo com os ids vindo de uma campanha já conferida por
+    // `obter()`: `canais` tem `empresa_id`, e uma consulta que PODE passar por
+    // `noEscopo` e não passa é a que sobra quando o vínculo entre campanha e
+    // canal ganhar um caminho novo.
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("canais").select("id, nome, numero"),
+      usuario,
+    ).in("id", ids);
+
+    if (error) throw new Error(`Falha ao ler os canais da campanha: ${error.message}`);
+
+    return new Map(
+      ((data ?? []) as unknown as { id: string; nome: string; numero: string | null }[]).map(
+        (c) => [c.id, { nome: c.nome, numero: c.numero }],
+      ),
+    );
   }
 
   async metricasDashboard(usuario: UsuarioAutenticado): Promise<MetricasDashboard> {

@@ -9,7 +9,9 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
+  Res,
 } from "@nestjs/common";
+import type { Response } from "express";
 import {
   campanhaEdicaoSchema,
   campanhaEntradaSchema,
@@ -103,5 +105,39 @@ export class CampanhasController {
     @IpOrigem() ip: string,
   ) {
     return { campanha: await this.campanhas.retomar(usuario, id, ip) };
+  }
+
+  /**
+   * Relatório da campanha em CSV.
+   *
+   * `@Res()` porque a resposta é arquivo, não JSON — mesmo arranjo do download
+   * da agenda em `canais.controller`. E, como lá, não é rota pública: leva
+   * telefone e texto de resposta de gente real, então o painel busca com o
+   * token e monta o download no navegador.
+   *
+   * `charset=utf-8` declarado junto com o BOM que `montarCsv` escreve: o Excel
+   * ignora o cabeçalho HTTP e olha o BOM, o resto do mundo faz o contrário.
+   */
+  @Get(":id/relatorio.csv")
+  async relatorio(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+    @Res() res: Response,
+  ) {
+    const { arquivo, nome, total } = await this.campanhas.relatorio(usuario, id, ip);
+    res
+      .status(200)
+      .set({
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${nome}"`,
+        // Mesmo cabeçalho que o download da agenda usa, e lido pelo mesmo
+        // `baixarArquivo` no painel: o corpo é arquivo e não tem onde carregar
+        // a contagem que o aviso na tela mostra.
+        "X-Total-Contatos": String(total),
+        "Access-Control-Expose-Headers": "X-Total-Contatos",
+        "Cache-Control": "no-store",
+      })
+      .send(arquivo);
   }
 }
