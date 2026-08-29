@@ -72,14 +72,19 @@ export class CanaisController {
     return this.canais.verificar(usuario, id);
   }
 
+  /**
+   * O serviço já devolve `{ canal, aviso? }`, então o retorno é repassado
+   * inteiro em vez de reembrulhado. O corpo continua `{ canal }` para quem só
+   * lê o canal — `aviso` é acrescentado, e só aparece quando existe.
+   */
   @Patch(":id")
-  async ajustar(
+  ajustar(
     @Usuario() usuario: UsuarioAutenticado,
     @Param("id", ParseUUIDPipe) id: string,
     @Body(new ValidacaoZodPipe(canalAjusteSchema)) corpo: z.infer<typeof canalAjusteSchema>,
     @IpOrigem() ip: string,
   ) {
-    return { canal: await this.canais.ajustar(usuario, id, corpo, ip) };
+    return this.canais.ajustar(usuario, id, corpo, ip);
   }
 
   /**

@@ -53,6 +53,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * A intermitência que sobrava aqui NÃO era deste arquivo — nem do serviço.
+ *
+ * Reproduzida sob carga: o `await import()` logo depois do `vi.resetModules()`
+ * reconstrói o grafo inteiro (`config/ambiente`, zod, `@nestjs/common`) e
+ * passou de 10993 ms, contra ~40 ms no caso normal. O primeiro teste estourava
+ * os 5 s padrão; o vitest o abortava, mas o corpo dele seguia rodando. Quando
+ * terminava, o `relatarErro` — fire-and-forget de propósito — mandava o POST
+ * direto no espião do teste SEGUINTE, com o `ALERTA_WEBHOOK_URL` do teste
+ * seguinte. A lista chegava com a mesma URL duas vezes e o vermelho aparecia no
+ * teste inocente, abaixo.
+ *
+ * Não há nada a corrigir em `enviarAlerta`: ele manda UM POST. O que precisava
+ * sumir era a chance de um teste sobreviver ao próprio fim, e isso mora no
+ * `testTimeout` de `vitest.config.ts`, junto do resto das redes de proteção
+ * entre arquivos.
+ */
 describe("ObservabilidadeService.relatarErro", () => {
   /**
    * O caso que motivou a tolerância: o worker morreu no boot três dias

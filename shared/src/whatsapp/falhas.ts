@@ -202,6 +202,28 @@ export function paraCampanha(codigo: CodigoFalha): boolean {
 }
 
 /**
+ * A culpa é NOSSA — nossa infraestrutura ou nossa instalação?
+ *
+ * Divide a taxonomia na única fronteira que muda o que o sistema faz com o
+ * contato: `infra` e `configuracao` são problemas do nosso lado, e um contato
+ * nunca pode ser encerrado como `falhou` por causa deles. Ele volta para
+ * `pendente` e a campanha pausa, porque a causa some quando arrumamos — e um
+ * contato `falhou` não é reenviado nunca mais.
+ *
+ * As demais categorias são do lado de fora: `canal` é o WhatsApp do cliente,
+ * `destinatario` é o número, `conteudo` é a mensagem, `limite` é a proteção
+ * funcionando. Nenhuma delas se resolve sozinha esperando.
+ *
+ * Existe como função e não como comparação solta porque a pergunta "de quem foi
+ * a culpa" é feita em mais de um lugar, e cada cópia da lista de categorias é
+ * uma chance de esquecer uma quando a união crescer.
+ */
+export function culpaNossa(codigo: CodigoFalha): boolean {
+  const categoria = FALHAS[codigo].categoria;
+  return categoria === "infra" || categoria === "configuracao";
+}
+
+/**
  * Classifica uma resposta da Evolution API.
  *
  * `status: 0` significa que o fetch nem chegou a receber resposta. É o sinal

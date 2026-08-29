@@ -6,7 +6,7 @@ import type {
   ResultadoEnvio,
   Spintax,
 } from "@disparoy/dominio";
-import { categoriaDe, explicar, paraCampanha, statusDoGateway } from "@disparoy/dominio";
+import { categoriaDe, culpaNossa, explicar, paraCampanha, statusDoGateway } from "@disparoy/dominio";
 import {
   estadoDaInstancia,
   fotoDaInstancia,
@@ -500,22 +500,46 @@ export class DisparoService {
       .eq("id", canal.id);
 
     /**
-     * O gateway respondeu que a sessão está viva: a suspeita era falsa.
+     * O gateway respondeu que a sessão está viva.
      *
-     * A falha foi do destinatário ou do conteúdo, e a campanha não tem por que
-     * parar. Aproveita para corrigir o cache, que estava mentindo.
+     * Aproveita para corrigir o cache, que estava mentindo — isso vale
+     * independentemente de quem seja a culpa pela falha do envio.
      */
     if (estado === "open") {
       if (canal.status !== "conectado") {
         await this.supabase.tabela("canais").update({ status: "conectado" }).eq("id", canal.id);
       }
-      await this.encerrarContato(
-        job,
-        "falhou",
-        explicar(suspeita, { canal: canal.nome, detalhe }),
-        suspeita,
-      );
-      return;
+
+      /*
+       * Sessão viva derruba a suspeita sobre o CLIENTE, não sobre nós.
+       *
+       * Quando a suspeita era de canal, `open` a desmente: sobrou o
+       * destinatário ou o conteúdo, e o contato falha de verdade. Mas os
+       * códigos que chegam aqui não são só de canal — `paraCampanha` também é
+       * verdadeiro para `gateway_timeout`, `gateway_indisponivel` e
+       * `canal_mal_configurado`. Para esses, a instância estar `open` não prova
+       * nada: um envio pode estourar timeout enquanto a consulta de estado,
+       * feita logo depois e mais barata, responde normalmente.
+       *
+       * Antes desta checagem o contato era encerrado como `falhou` carregando
+       * `falha_categoria = 'infra'` — uma linha que se contradiz sozinha, num
+       * status que nunca mais é reenviado, apesar de `retentavel: true` na
+       * taxonomia. É exatamente o que a regra "contato só vira `falhou` quando
+       * a culpa é do destinatário ou do conteúdo" existe para impedir; ela só
+       * não estava escrita neste caminho.
+       *
+       * Culpa nossa cai no fluxo de baixo: contato volta para `pendente` e a
+       * campanha pausa até alguém arrumar.
+       */
+      if (!culpaNossa(suspeita)) {
+        await this.encerrarContato(
+          job,
+          "falhou",
+          explicar(suspeita, { canal: canal.nome, detalhe }),
+          suspeita,
+        );
+        return;
+      }
     }
 
     // Gateway mudo significa que o problema é NOSSO, não do WhatsApp do

@@ -219,7 +219,8 @@ Quando um envio falha com um código da categoria `canal` ou `infra`, o worker
 
 | Resposta do gateway | Veredito | Ação |
 |---|---|---|
-| `open` | A sessão está viva. A falha foi do destinatário ou do conteúdo. | Contato falha, campanha **continua**. |
+| `open`, suspeita de **canal** ou **conteúdo** | A sessão está viva: a suspeita sobre o canal caiu. Sobrou o destinatário ou o conteúdo. | Contato falha, campanha **continua**. |
+| `open`, suspeita de **infra** ou **configuração** | A sessão está viva, mas isso não isenta o nosso lado. | `canais.status` **não muda**, incidente com o código original, contato volta a `pendente`, campanha vira `pausada_por_canal`. |
 | `close` / `connecting` | O WhatsApp do cliente caiu de verdade. | `canais.status = 'desconectado'`, incidente `canal`, contato volta a `pendente`, campanha vira `pausada_por_canal`. |
 | Não responde (timeout, `ECONNREFUSED`, 5xx) | A Evolution está fora do ar. Não é culpa do cliente. | `canais.status` **não muda**, incidente `infra`, contato volta a `pendente`, campanha vira `pausada_por_canal`. |
 
@@ -230,6 +231,18 @@ ar, já estamos vendo" deixa de ser um chute.
 Uma regra que sustenta isso: **contato só vira `falhou` quando a culpa é do
 destinatário ou do conteúdo.** Culpa do canal ou da infra devolve o contato para
 `pendente` e pausa a campanha. Nada se perde.
+
+As duas primeiras linhas da tabela eram uma só, e a diferença entre elas custou
+um bug. `open` era lido como "a suspeita era falsa", ponto — mas nem toda
+suspeita que chega aqui é sobre o canal: `paraCampanha` também é verdadeiro para
+`gateway_timeout`, `gateway_indisponivel` e `canal_mal_configurado`. Um envio
+pode estourar timeout enquanto a consulta de estado, feita logo depois e mais
+barata, responde `open` normalmente. O contato era encerrado como `falhou`
+carregando `falha_categoria = 'infra'` — uma linha que se contradiz sozinha,
+num status que nunca mais é reenviado, apesar de `retentavel: true` na
+taxonomia. Quem separa os dois casos é `culpaNossa()`, em
+`shared/src/whatsapp/falhas.ts`; `worker/atribuicao.test.ts` trava o
+comportamento.
 
 ### Camada 3 — vigiar e reconciliar
 
@@ -750,13 +763,19 @@ private async tratarSuspeitaDeCanal(
     estado_gateway: estado,
   }).eq("id", canal.id);
 
-  // O gateway respondeu que está tudo bem: a suspeita era falsa. A falha foi
-  // do destinatário ou do conteúdo, e a campanha não tem por que parar.
+  // O gateway respondeu que está tudo bem: o cache mentia, e isso se corrige
+  // independentemente de quem seja a culpa pela falha do envio.
   if (estado === "open") {
     await this.supabase.tabela("canais")
       .update({ status: "conectado" }).eq("id", canal.id);
-    await this.encerrarContato(job, "falhou", explicar(suspeita, { detalhe }), suspeita);
-    return;
+
+    // Sessão viva derruba a suspeita sobre o CLIENTE, não sobre nós. Com
+    // `gateway_timeout` ou `canal_mal_configurado`, `open` não prova nada, e o
+    // contato cai no fluxo de baixo: volta para `pendente`, campanha pausa.
+    if (!culpaNossa(suspeita)) {
+      await this.encerrarContato(job, "falhou", explicar(suspeita, { detalhe }), suspeita);
+      return;
+    }
   }
 
   const codigo: CodigoFalha =
@@ -986,7 +1005,7 @@ Seguindo o padrão que já está em `backend/src/**/*.test.ts`:
 | Arquivo | O que garante |
 |---|---|
 | `whatsapp/classificacao.test.ts` | Cada resposta conhecida da Evolution cai no código certo. Em especial: `status 0` vira `gateway_indisponivel` e **nunca** `canal_desconectado`. É a asserção central de todo o desenho. |
-| `worker/atribuicao.test.ts` | Gateway responde `open` → contato falha e campanha **continua**. Gateway responde `close` → contato volta a `pendente` e campanha pausa. Gateway mudo → canal **não** é rebaixado. |
+| `worker/atribuicao.test.ts` | Gateway responde `open` com suspeita de canal ou conteúdo → contato falha e campanha **continua**. Gateway responde `open` com suspeita de infra ou configuração → contato **não** falha, campanha pausa. Gateway responde `close` → contato volta a `pendente` e campanha pausa. Gateway mudo → canal **não** é rebaixado. |
 | `worker/retomada.test.ts` | `retomar_campanhas_do_canal` solta o que foi pausado pelo sistema e **não** solta o que foi pausado por uma pessoa. |
 | `worker/vigilancia.test.ts` | Canal `conectado` no banco com gateway em `close` é corrigido; gateway `indisponivel` não muda nada. |
 

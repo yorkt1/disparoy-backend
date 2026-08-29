@@ -446,13 +446,40 @@ export class CanaisService {
     id: string,
     dados: z.infer<typeof canalAjusteSchema>,
     ip: string,
-  ): Promise<Canal> {
+  ): Promise<{ canal: Canal; aviso?: string }> {
     const canal = await this.obter(usuario, id);
+    let aviso: string | undefined;
 
     // Encerra a sessão ANTES de mudar o estado local, senão o número seguiria
     // pareado na Evolution enquanto aparece como desconectado aqui.
     if (dados.status === "desconectado" && canal.tipoConexao === "qrcode") {
-      await this.whatsapp.encerrarSessaoQr(canal).catch(() => undefined);
+      /*
+       * A falha aqui É o estado que o comentário acima diz querer evitar.
+       *
+       * O `.catch(() => undefined)` que ficava nesta linha engolia exatamente o
+       * desfecho que importa: a Evolution recusa o encerramento, o número segue
+       * pareado lá, e o painel passa a exibir "desconectado" com toda
+       * convicção. O operador então entrega o chip para outra pessoa parear, ou
+       * reaproveita a instância, com a sessão anterior viva — e nada em tela
+       * nunca disse que a desconexão não aconteceu de verdade.
+       *
+       * Continuar é certo: o estado local PRECISA mudar de qualquer forma, e
+       * abortar deixaria o operador sem nem o registro do que ele pediu. O que
+       * faltava era contar. Mesmo padrão de `criar` e `reconectar`, onde o
+       * comentário do aviso descartado registra esta mesma lição.
+       */
+      try {
+        await this.whatsapp.encerrarSessaoQr(canal);
+      } catch (e) {
+        const detalhe = e instanceof Error ? e.message : String(e);
+        this.logger.error(
+          `Canal ${rotular(canal)}: a Evolution recusou encerrar a sessão (${detalhe}). ` +
+            `O status local virou "desconectado" mesmo assim.`,
+        );
+        aviso =
+          "O status foi alterado aqui, mas a Evolution não confirmou o encerramento da " +
+          "sessão — o número pode continuar pareado. Confira antes de parear outro chip.";
+      }
 
       /*
        * A agenda em cache não pode sobreviver ao número que saiu.
@@ -479,7 +506,9 @@ export class CanaisService {
       }
     }
     if (dados.status !== undefined) atualizacao.status = dados.status;
-    if (Object.keys(atualizacao).length === 0) return canal;
+    // Nada a gravar, mas o aviso segue junto: a tentativa de encerrar a sessão
+    // aconteceu, e o desfecho dela não depende de haver coluna para atualizar.
+    if (Object.keys(atualizacao).length === 0) return { canal, aviso };
 
     const { data, error } = await this.supabase
       .tabela("canais")
@@ -503,7 +532,7 @@ export class CanaisService {
       });
     }
 
-    return paraCanal(data as unknown as LinhaCanal);
+    return { canal: paraCanal(data as unknown as LinhaCanal), aviso };
   }
 
   /**
