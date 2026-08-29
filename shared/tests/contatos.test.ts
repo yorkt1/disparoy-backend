@@ -3,9 +3,11 @@ import {
   detectarColunaNome,
   detectarColunaTelefone,
   ehPedidoDeSaida,
+  mapeamentoPadrao,
   montarContatos,
   montarContatosColados,
 } from "../src/contatos";
+import { renderizarMensagem } from "../src/spintax";
 
 describe("detectarColunaTelefone", () => {
   it("reconhece nomes usuais de coluna", () => {
@@ -141,5 +143,94 @@ describe("ehPedidoDeSaida", () => {
     expect(ehPedidoDeSaida("oi, tudo bem?")).toBe(false);
     expect(ehPedidoDeSaida("quero saber mais")).toBe(false);
     expect(ehPedidoDeSaida("")).toBe(false);
+  });
+});
+
+describe("mapeamentoPadrao", () => {
+  it("faz {{1}} valer o nome e as extras seguirem em {{2}}", () => {
+    expect(mapeamentoPadrao(["nome", "telefone", "cidade"], "telefone", "nome")).toEqual({
+      "1": "nome",
+      nome: "nome",
+      "2": "cidade",
+      cidade: "cidade",
+    });
+  });
+
+  it("sem coluna de nome, a primeira extra ocupa {{1}}", () => {
+    // Senão `{{1}}` ficaria eternamente vazio numa planilha só de números e
+    // colunas de negócio, e o operador não teria como referenciar a primeira.
+    expect(mapeamentoPadrao(["telefone", "cupom"], "telefone", "")).toEqual({
+      "1": "cupom",
+      cupom: "cupom",
+    });
+  });
+
+  it("dá nome acessível às colunas com acento e espaço", () => {
+    expect(mapeamentoPadrao(["fone", "Data da Compra"], "fone", "")).toEqual({
+      "1": "Data da Compra",
+      data_da_compra: "Data da Compra",
+    });
+  });
+
+  it("coluna chamada '2' não sequestra a posicional {{2}}", () => {
+    const mapa = mapeamentoPadrao(["fone", "nome", "2", "cidade"], "fone", "nome");
+    expect(mapa["2"]).toBe("2");
+    expect(mapa["3"]).toBe("cidade");
+  });
+});
+
+describe("montarContatos sem mapeamento explícito", () => {
+  const linhas = [
+    { Nome: "Maria", Telefone: "11988887777", Cidade: "Recife" },
+    { Nome: "João", Telefone: "11977776666", Cidade: "Natal" },
+  ];
+
+  it("preenche as variáveis com o nome e as colunas extras", () => {
+    const r = montarContatos(linhas, "Telefone", {
+      colunaNome: "Nome",
+      colunas: ["Nome", "Telefone", "Cidade"],
+    });
+
+    expect(r.contatos[0].variaveis).toEqual({
+      "1": "Maria",
+      nome: "Maria",
+      "2": "Recife",
+      cidade: "Recife",
+    });
+  });
+
+  /*
+   * O teste que faltava. "Olá {{1}}" saía com as chaves literais para a lista
+   * inteira porque `variaveis` chegava vazio ao `renderizarMensagem` — e nada
+   * quebrava, porque referência não resolvida é mantida de propósito.
+   */
+  it("faz 'Olá {{1}}' virar 'Olá Maria' no texto renderizado", () => {
+    const r = montarContatos(linhas, "Telefone", {
+      colunaNome: "Nome",
+      colunas: ["Nome", "Telefone", "Cidade"],
+    });
+
+    const texto = renderizarMensagem("Olá {{1}}, tudo bem? Vi que você é de {{cidade}}.", {
+      variacoes: {},
+      variaveis: r.contatos[0].variaveis,
+    });
+
+    expect(texto).toBe("Olá Maria, tudo bem? Vi que você é de Recife.");
+  });
+
+  it("números colados continuam sem variável nenhuma", () => {
+    // Não há coluna para mapear: `{{1}}` fica literal, que é o certo — melhor
+    // o operador ver o buraco do que a mensagem sair com "Olá ,".
+    const r = montarContatosColados("11988887777");
+    expect(r.contatos[0].variaveis).toEqual({});
+  });
+
+  it("mapeamento explícito continua vencendo o padrão", () => {
+    const r = montarContatos(linhas, "Telefone", {
+      colunaNome: "Nome",
+      colunas: ["Nome", "Telefone", "Cidade"],
+      mapeamento: { "1": "Cidade" },
+    });
+    expect(r.contatos[0].variaveis).toEqual({ "1": "Recife" });
   });
 });

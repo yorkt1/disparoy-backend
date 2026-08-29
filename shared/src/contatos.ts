@@ -55,18 +55,73 @@ export function detectarColunaNome(colunas: string[], colunaTelefone: string): s
 }
 
 /**
+ * O mapeamento que vale quando ninguém escolheu nenhum: `{{1}}` é o NOME.
+ *
+ * Sem isto o painel prometia uma coisa e entregava outra. A tela de público
+ * diz "uma coluna de nome é reconhecida sozinha, e as demais viram variáveis",
+ * o editor tem um botão que insere `{{1}}` — e `montarContatos` era chamado
+ * sem mapeamento nenhum, então `variaveis` saía `{}` e "Olá {{1}}" era
+ * disparado com as chaves literais para a lista inteira.
+ *
+ * `{{1}}` é o nome porque é o que o operador escreve quando pensa "primeira
+ * variável": a coluna de nome é a primeira coisa que qualquer planilha de
+ * disparo tem. As colunas extras seguem a partir de `{{2}}`, na ordem da
+ * planilha, e ganham TAMBÉM o nome delas (`{{cidade}}`) — posicional para quem
+ * conta, nomeado para quem lê. Planilha sem coluna de nome começa em `{{1}}`
+ * na primeira coluna extra, senão `{{1}}` ficaria eternamente vazio.
+ */
+export function mapeamentoPadrao(
+  colunas: string[],
+  colunaTelefone: string,
+  colunaNome = "",
+): MapeamentoVariaveis {
+  const mapa: MapeamentoVariaveis = {};
+  let posicao = 1;
+
+  if (colunaNome) {
+    mapa["1"] = colunaNome;
+    mapa.nome = colunaNome;
+    posicao = 2;
+  }
+
+  for (const coluna of colunas) {
+    if (!coluna || coluna === colunaTelefone || coluna === colunaNome) continue;
+    mapa[String(posicao)] = coluna;
+    const slug = slugify(coluna);
+    // `!(slug in mapa)` protege a posicional: uma coluna chamada "2" viraria
+    // slug "2" e sobrescreveria o `{{2}}` de outra coluna, calado.
+    if (slug && !/^[0-9]+$/.test(slug) && !(slug in mapa)) mapa[slug] = coluna;
+    posicao += 1;
+  }
+
+  return mapa;
+}
+
+/**
  * Normaliza os números e anexa nome e variáveis mapeadas.
  *
  * Duplicatas (mesmo E.164) são descartadas mantendo a primeira ocorrência;
  * inválidos ficam na lista, marcados, para o operador poder revisar antes de
  * importar em vez de descobrir o problema depois.
+ *
+ * Sem `mapeamento` explícito vale o `mapeamentoPadrao` — e é ele que faz
+ * `{{1}}` valer o nome do contato. Passar `{}` de propósito não existe: quem
+ * quer texto sem variável simplesmente não escreve `{{1}}`.
  */
 export function montarContatos(
   linhas: Record<string, string>[],
   colunaTelefone: string,
-  opcoes: { colunaNome?: string; mapeamento?: MapeamentoVariaveis } = {},
+  opcoes: {
+    colunaNome?: string;
+    mapeamento?: MapeamentoVariaveis;
+    /** Ordem real das colunas. Sem ela, a da primeira linha lida. */
+    colunas?: string[];
+  } = {},
 ): ResultadoImportacao {
-  const { colunaNome = "", mapeamento = {} } = opcoes;
+  const { colunaNome = "" } = opcoes;
+  const mapeamento =
+    opcoes.mapeamento ??
+    mapeamentoPadrao(opcoes.colunas ?? Object.keys(linhas[0] ?? {}), colunaTelefone, colunaNome);
   const vistos = new Set<string>();
   const contatos: ContatoImportado[] = [];
   let validos = 0;

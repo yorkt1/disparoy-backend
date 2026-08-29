@@ -113,6 +113,22 @@ export class CampanhasController {
     return { excluido: await this.campanhas.excluir(usuario, id, ip) };
   }
 
+  /**
+   * Cópia da campanha, sempre em rascunho.
+   *
+   * `@Post` sem corpo: não há nada a escolher — o que se duplica é a campanha
+   * inteira, e um corpo com "o que copiar" seria a tela de criação de novo.
+   */
+  @Post(":id/duplicar")
+  @HttpCode(201)
+  async duplicar(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+  ) {
+    return { campanha: await this.campanhas.duplicar(usuario, id, ip) };
+  }
+
   @Post(":id/pausar")
   @HttpCode(200)
   async pausar(

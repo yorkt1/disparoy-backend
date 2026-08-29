@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { ConflictException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import type {
   Campanha,
   CampanhaEdicao,
@@ -6,12 +6,13 @@ import type {
   ContatoDaCampanha,
   MetricasDashboard,
   Paginado,
+  RespostaRecebida,
   ResumoCampanha,
   ResumoSituacao,
   SituacaoContato,
   StatusCampanha,
 } from "@disparoy/dominio";
-import { percentual, slugify } from "@disparoy/dominio";
+import { LIMITES, MAX_RESPOSTAS_NA_LISTA, percentual, slugify } from "@disparoy/dominio";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { CanaisService } from "../canais/canais.service";
@@ -81,6 +82,7 @@ interface LinhaResposta {
   campanha_contato_id: number;
   texto: string | null;
   tipo: TipoResposta;
+  recebida_em?: string | null;
 }
 
 /** O que sobra de todas as mensagens de um contato depois de dobradas. */
@@ -91,6 +93,8 @@ interface EnvioResumido {
 
 @Injectable()
 export class CampanhasService {
+  private readonly logger = new Logger(CampanhasService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly auditoria: AuditoriaService,
@@ -165,7 +169,9 @@ export class CampanhasService {
       .order("id")
       .limit(limite);
 
-    return ((data ?? []) as unknown as LinhaContatoCampanha[]).map(paraContatoDaCampanha);
+    const linhas = (data ?? []) as unknown as LinhaContatoCampanha[];
+    const respostas = await this.textosDasRespostas(id, linhas);
+    return linhas.map((l) => paraContatoDaCampanha(l, respostas.get(l.id) ?? []));
   }
 
   /**
@@ -217,15 +223,79 @@ export class CampanhasService {
       p_campanha_id: id,
     });
 
+    const linhas = (data ?? []) as unknown as LinhaContatoCampanha[];
+    const textos = await this.textosDasRespostas(id, linhas);
+
     const total = count ?? 0;
     return {
-      itens: ((data ?? []) as unknown as LinhaContatoCampanha[]).map(paraContatoDaCampanha),
+      itens: linhas.map((l) => paraContatoDaCampanha(l, textos.get(l.id) ?? [])),
       pagina,
       porPagina,
       total,
       totalPaginas: Math.max(Math.ceil(total / porPagina), 1),
       resumo: (resumo ?? {}) as ResumoSituacao,
     };
+  }
+
+  /**
+   * O TEXTO das últimas respostas dos contatos JÁ carregados nesta página.
+   *
+   * O painel contava respostas e nunca mostrava nenhuma. O texto está gravado
+   * desde a migration `20260826000100` e só saía pelo CSV — o operador via "3"
+   * numa coluna e tinha de baixar uma planilha para descobrir que uma delas
+   * era "pode me ligar agora?". Esta consulta é o que fecha esse buraco.
+   *
+   * Restrita aos ids da PÁGINA (no máximo 100) e só aos que têm `respostas > 0`:
+   * é o que impede a lista de campanha de 20 mil contatos virar uma varredura
+   * da tabela inteira a cada troca de página. Campanha sem resposta nenhuma
+   * não faz consulta.
+   *
+   * Ordenada por chegada e cortada nas ÚLTIMAS: quem respondeu quinze vezes
+   * está esperando por causa da última, não da primeira — ao contrário do CSV,
+   * que guarda as primeiras porque lá a pergunta é "o que essa campanha
+   * provocou", não "o que eu preciso responder agora".
+   */
+  private async textosDasRespostas(
+    campanhaId: string,
+    linhas: LinhaContatoCampanha[],
+  ): Promise<Map<number, RespostaRecebida[]>> {
+    const porContato = new Map<number, RespostaRecebida[]>();
+    const ids = linhas.filter((l) => (l.respostas ?? 0) > 0).map((l) => l.id);
+    if (ids.length === 0) return porContato;
+
+    const { data, error } = await this.supabase
+      .tabela("respostas_recebidas")
+      .select("campanha_contato_id, texto, tipo, recebida_em")
+      .eq("campanha_id", campanhaId)
+      .in("campanha_contato_id", ids)
+      // `id` desempata: o WhatsApp manda o timestamp em segundos, então duas
+      // respostas seguidas têm o mesmo `recebida_em` e sem critério estável a
+      // ordem muda a cada recarga da tela.
+      .order("recebida_em", { ascending: false })
+      .order("id", { ascending: false });
+
+    /*
+     * Aviso, e não exceção: a resposta é um extra da tela de contatos. Derrubar
+     * a listagem inteira porque o texto não veio deixaria o operador sem ver
+     * NEM quem respondeu — pior do que o problema que este método resolve.
+     */
+    if (error) {
+      this.logger.warn(`Não foi possível ler o texto das respostas: ${error.message}`);
+      return porContato;
+    }
+
+    for (const linha of (data ?? []) as unknown as LinhaResposta[]) {
+      const lista = porContato.get(linha.campanha_contato_id) ?? [];
+      if (lista.length >= MAX_RESPOSTAS_NA_LISTA) continue;
+      lista.push({
+        texto: linha.texto ?? "",
+        tipo: linha.tipo,
+        recebidaEm: linha.recebida_em ?? "",
+      });
+      porContato.set(linha.campanha_contato_id, lista);
+    }
+
+    return porContato;
   }
 
   /**
@@ -626,6 +696,139 @@ export class CampanhasService {
     );
   }
 
+  /**
+   * Copia a campanha inteira — texto, canais, intervalos e PÚBLICO — em rascunho.
+   *
+   * Faltava e não tinha substituto: repetir um disparo para a mesma lista
+   * obrigava a reimportar a planilha, e quem não a tivesse mais em mãos não
+   * tinha caminho nenhum — o público vive dentro da campanha desde a migration
+   * `20260815000500` e não há tela que o exporte de volta.
+   *
+   * Nasce SEMPRE em rascunho, nunca herda o agendamento e nunca enfileira
+   * nada. Duplicar é um clique, e um clique que começa a disparar para vinte
+   * mil pessoas é o tipo de acidente que não tem desfazer: a mensagem já saiu.
+   * Quem quiser disparar clica "Retomar" depois, com o texto na frente.
+   *
+   * O público volta pela mesma RPC de `criar`, e não por um `insert ... select`
+   * que copiaria as linhas direto: a RPC reaplica o filtro de opt-out. Quem
+   * pediu para sair DEPOIS do disparo original não pode reaparecer numa cópia
+   * feita hoje — seria justamente a segunda mensagem que ele proibiu.
+   *
+   * As métricas não vêm junto por serem da execução, não da campanha: enviadas,
+   * lidas e respostas pertencem ao disparo que aconteceu, e uma cópia que
+   * nascesse com "40 lidas" mentiria no dashboard do primeiro dia.
+   */
+  async duplicar(usuario: UsuarioAutenticado, id: string, ip: string): Promise<ResumoCampanha> {
+    const original = await this.obter(usuario, id);
+    const nome = nomeDaCopia(original.nome);
+
+    // O público ANTES do INSERT: falhar aqui não deixa campanha órfã para trás.
+    const publico = await this.publicoDaCampanha(id);
+
+    const { data, error } = await this.supabase
+      .tabela("campanhas")
+      .insert({
+        nome,
+        status: "rascunho",
+        lista_id: null,
+        empresa_id: empresaParaEscrita(usuario),
+        sequencia: original.sequencia,
+        intervalo_contatos_min: original.intervaloEntreContatos.minSegundos,
+        intervalo_contatos_max: original.intervaloEntreContatos.maxSegundos,
+        intervalo_mensagens_min: original.intervaloEntreMensagens.minSegundos,
+        intervalo_mensagens_max: original.intervaloEntreMensagens.maxSegundos,
+        validar_numeros: original.validarNumeros,
+        agendada_para: null,
+        template_principal: original.templatePrincipal,
+        criada_por: usuario.id,
+        iniciada_em: null,
+      })
+      .select("id")
+      .single();
+
+    if (error) throw new Error(`Falha ao duplicar campanha: ${error.message}`);
+    const novaId = (data as { id: string }).id;
+
+    /*
+     * Canal desconectado NÃO barra a duplicação, ao contrário de `criar`.
+     *
+     * `exigirCanaisProntos` existe para impedir campanha que vai disparar por
+     * um número fora do ar; um rascunho não dispara nada. Exigi-lo aqui faria
+     * o botão falhar justamente no dia em que o QR caiu — que é quando o
+     * operador está refazendo a campanha. A checagem acontece em "Retomar".
+     */
+    if (original.canaisIds.length > 0) await this.vincularCanais(novaId, original.canaisIds);
+
+    let elegiveis = 0;
+    if (publico.length > 0) {
+      const { data: total, error: erroPopular } = await this.supabase.db.rpc(
+        "popular_publico_da_campanha",
+        { p_campanha_id: novaId, p_publico: publico },
+      );
+      if (erroPopular) {
+        // A cópia sem público seria uma campanha que o operador acha pronta e
+        // não dispara para ninguém. Melhor não deixá-la existir.
+        await this.supabase.tabela("campanhas").delete().eq("id", novaId);
+        throw new Error(`Falha ao copiar o público da campanha: ${erroPopular.message}`);
+      }
+      elegiveis = Number(total ?? 0);
+    }
+
+    await this.auditoria.registrar({
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      acao: "campanha.duplicada",
+      tipoEntidade: "campanha",
+      entidadeId: novaId,
+      entidadeRotulo: nome,
+      ip,
+      detalhes: {
+        origem: id,
+        contatosCopiados: publico.length,
+        contatosElegiveis: elegiveis,
+        canais: original.canaisIds.length,
+      },
+    });
+
+    return paraResumoCampanha((await this.linha(novaId)) ?? ({ id: novaId } as LinhaCampanha));
+  }
+
+  /**
+   * O público de uma campanha na forma que `popular_publico_da_campanha` come.
+   *
+   * Paginado pelo mesmo motivo do relatório: o PostgREST corta em mil linhas e
+   * não avisa, e uma cópia silenciosamente truncada em mil contatos é pior do
+   * que nenhuma cópia — o operador dispararia achando que alcançou a lista
+   * inteira.
+   *
+   * O nome sai de `variaveis.nome` porque é lá que ele está: a RPC grava
+   * `contato_id = null` e descarta o `nome` do payload (ver `mapeamentoPadrao`).
+   */
+  private async publicoDaCampanha(
+    id: string,
+  ): Promise<{ telefone: string; nome: string; variaveis: Record<string, string> }[]> {
+    const tudo: { telefone: string; nome: string; variaveis: Record<string, string> }[] = [];
+
+    for (let de = 0; ; de += PAGINA_RELATORIO) {
+      const { data, error } = await this.supabase
+        .tabela("campanha_contatos")
+        .select("telefone, variaveis")
+        .eq("campanha_id", id)
+        .order("id")
+        .range(de, de + PAGINA_RELATORIO - 1);
+
+      if (error) throw new Error(`Falha ao ler o público da campanha: ${error.message}`);
+      const lote = (data ?? []) as unknown as { telefone: string; variaveis: unknown }[];
+
+      for (const linha of lote) {
+        const vars = variaveis(linha.variaveis);
+        tudo.push({ telefone: linha.telefone, nome: vars.nome ?? "", variaveis: vars });
+      }
+
+      if (lote.length < PAGINA_RELATORIO) return tudo;
+    }
+  }
+
   async pausar(usuario: UsuarioAutenticado, id: string, ip: string): Promise<ResumoCampanha> {
     const campanha = await this.obter(usuario, id);
     if (campanha.status !== "em_andamento" && campanha.status !== "agendada") {
@@ -906,4 +1109,22 @@ export class CampanhasService {
       .insert(canaisIds.map((canal_id) => ({ campanha_id: campanhaId, canal_id })));
     if (error) throw new Error(`Falha ao vincular canais: ${error.message}`);
   }
+}
+
+/**
+ * "Campanha X" -> "Campanha X (cópia)", e a cópia da cópia não vira
+ * "(cópia) (cópia)" — vira "(cópia 2)".
+ *
+ * O corte respeita `maxCaracteresNomeCampanha`: a coluna tem limite e um nome
+ * comprido duplicado duas vezes estouraria o INSERT com erro de banco cru na
+ * cara do operador. O sufixo é o que sobrevive ao corte, porque é ele que
+ * distingue a cópia do original na lista.
+ */
+export function nomeDaCopia(nome: string): string {
+  const m = /^(.*) \(cópia(?: (\d+))?\)$/.exec(nome.trim());
+  const raiz = m ? m[1] : nome.trim();
+  const proxima = m ? Number(m[2] ?? 1) + 1 : 1;
+  const sufixo = proxima === 1 ? " (cópia)" : ` (cópia ${proxima})`;
+  const espaco = LIMITES.maxCaracteresNomeCampanha - sufixo.length;
+  return `${raiz.slice(0, Math.max(espaco, 1)).trimEnd()}${sufixo}`;
 }

@@ -341,6 +341,28 @@ export type ResumoCampanha = Omit<Campanha, "sequencia"> & {
  */
 export type SituacaoContato = "pendente" | "falhou" | "enviado" | "lido" | "respondeu";
 
+/**
+ * O que veio de volta. Mídia não tem texto: o que informa é o `tipo`, e a tela
+ * mostra "[áudio]" em vez de uma linha em branco que se lê como "não respondeu".
+ */
+export type TipoResposta =
+  | "texto"
+  | "imagem"
+  | "audio"
+  | "video"
+  | "documento"
+  | "figurinha"
+  | "outro";
+
+export interface RespostaRecebida {
+  texto: string;
+  tipo: TipoResposta;
+  recebidaEm: string;
+}
+
+/** Quantas respostas por contato a lista da campanha carrega. */
+export const MAX_RESPOSTAS_NA_LISTA = 3;
+
 export interface ContatoDaCampanha {
   id: number;
   contatoId: string;
@@ -352,6 +374,19 @@ export interface ContatoDaCampanha {
   lidaEm: string | null;
   /** Quantas mensagens o contato mandou de volta. */
   respostas: number;
+  /**
+   * O TEXTO das últimas respostas, cortado em `MAX_RESPOSTAS_NA_LISTA`.
+   *
+   * O painel contava respostas e nunca mostrava nenhuma: o texto existia em
+   * `respostas_recebidas` desde a migration `20260826000100` e só saía pelo
+   * CSV do relatório. Quem disparava via "3" na coluna e tinha de baixar uma
+   * planilha para descobrir que uma delas era "pode me ligar agora?".
+   *
+   * Vazio não quer dizer "não respondeu" — quer dizer que esta consulta não
+   * carregou o texto (lista antiga, campanha sem resposta). Quem responde
+   * "respondeu?" é `situacao`.
+   */
+  ultimasRespostas: RespostaRecebida[];
   motivo: string | null;
   variaveis: Record<string, string>;
 }
@@ -395,6 +430,15 @@ export type AcaoLog =
   | "campanha.agendamento_expirado"
   | "campanha.rascunho_salvo"
   | "campanha.editada"
+  /**
+   * Cópia criada a partir de outra campanha.
+   *
+   * Separada de `campanha.criada` porque a pergunta que ela responde é outra:
+   * "de onde saiu esta lista?". A cópia leva o público inteiro do original —
+   * telefone e variáveis de gente real — sem ninguém reimportar planilha
+   * nenhuma, e `detalhes.origem` é o único registro de qual campanha o cedeu.
+   */
+  | "campanha.duplicada"
   | "campanha.excluida"
   /**
    * Relatório da campanha baixado em CSV — exportação de dado pessoal.

@@ -7,6 +7,7 @@ import type {
   Lista,
   LogAuditoria,
   MensagemSequencia,
+  RespostaRecebida,
   ResumoCampanha,
   Spintax,
   Template,
@@ -324,11 +325,23 @@ export interface LinhaContatoCampanha {
   contatos?: { nome: string | null } | null;
 }
 
-export function paraContatoDaCampanha(l: LinhaContatoCampanha): ContatoDaCampanha {
+export function paraContatoDaCampanha(
+  l: LinhaContatoCampanha,
+  ultimasRespostas: RespostaRecebida[] = [],
+): ContatoDaCampanha {
+  const vars = variaveis(l.variaveis);
   return {
     id: l.id,
     contatoId: l.contato_id,
-    nome: l.contatos?.nome ?? null,
+    /*
+     * O nome cai nas variáveis quando `contatos` não tem linha — que é o caso
+     * NORMAL desde que o público passou a viver dentro da campanha:
+     * `popular_publico_da_campanha` grava `contato_id = null` e descarta o
+     * `nome` do payload, então o join sempre volta vazio e a lista inteira
+     * aparecia identificada só por telefone. `variaveis.nome` é onde o nome
+     * realmente está (ver `mapeamentoPadrao`).
+     */
+    nome: l.contatos?.nome ?? (vars.nome?.trim() || null),
     telefone: l.telefone,
     status: l.status,
     // `?? "pendente"` cobre a linha lida antes da migration `20260826000200`
@@ -337,8 +350,9 @@ export function paraContatoDaCampanha(l: LinhaContatoCampanha): ContatoDaCampanh
     situacao: l.situacao ?? "pendente",
     lidaEm: iso(l.lida_em),
     respostas: l.respostas ?? 0,
+    ultimasRespostas,
     motivo: l.motivo,
-    variaveis: variaveis(l.variaveis),
+    variaveis: vars,
   };
 }
 

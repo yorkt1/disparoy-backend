@@ -1,6 +1,6 @@
 import { ConflictException, NotFoundException } from "@nestjs/common";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CampanhasService } from "./campanhas.service";
+import { CampanhasService, nomeDaCopia } from "./campanhas.service";
 import { LimitesService } from "../comum/limites.service";
 import { LIMITES_POR_PLANO, PLANO_PADRAO } from "../comum/limites-empresa";
 import type { AuditoriaService } from "../auditoria/auditoria.service";
@@ -8,7 +8,7 @@ import type { CanaisService } from "../canais/canais.service";
 import type { FilaService } from "../fila/fila.service";
 import type { SupabaseService } from "../supabase/supabase.service";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
-import type { CampanhaEntrada } from "@disparoy/dominio";
+import { LIMITES, type CampanhaEntrada } from "@disparoy/dominio";
 
 /**
  * Campanhas: persistência independente da fila (cenário A) e isolamento entre
@@ -405,5 +405,29 @@ describe("teto de campanhas simultâneas por empresa", () => {
 
     await expect(servico.retomar(global, "pausada-b", "127.0.0.1")).resolves.toBeDefined();
     expect(banco.campanhas.find((c) => c.id === "pausada-b")?.status).toBe("em_andamento");
+  });
+});
+
+describe("nomeDaCopia", () => {
+  it("marca a cópia sem deixar o original ambíguo na lista", () => {
+    expect(nomeDaCopia("Black Friday")).toBe("Black Friday (cópia)");
+  });
+
+  it("a cópia da cópia numera em vez de empilhar sufixo", () => {
+    // "X (cópia) (cópia) (cópia)" é ilegível na terceira, e a lista de
+    // campanhas é onde o operador procura qual das quatro é a boa.
+    expect(nomeDaCopia("Black Friday (cópia)")).toBe("Black Friday (cópia 2)");
+    expect(nomeDaCopia("Black Friday (cópia 2)")).toBe("Black Friday (cópia 3)");
+    expect(nomeDaCopia("Black Friday (cópia 9)")).toBe("Black Friday (cópia 10)");
+  });
+
+  it("corta o nome, nunca o sufixo, para caber no limite da coluna", () => {
+    // O INSERT estoura com erro de banco cru se passar do limite, e o sufixo é
+    // justamente o que distingue a cópia — cortá-lo derrotaria o propósito.
+    const comprido = "a".repeat(LIMITES.maxCaracteresNomeCampanha);
+    const copia = nomeDaCopia(comprido);
+
+    expect(copia.length).toBeLessThanOrEqual(LIMITES.maxCaracteresNomeCampanha);
+    expect(copia.endsWith(" (cópia)")).toBe(true);
   });
 });

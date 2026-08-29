@@ -11,6 +11,8 @@
  * escapamento e formatação sem banco nenhum.
  */
 
+import type { TipoResposta } from "@disparoy/dominio";
+
 const FUSO = "America/Sao_Paulo";
 
 /** Quantas respostas cabem na planilha. Além disso, o relatório não é o lugar. */
@@ -19,14 +21,12 @@ export const MAX_RESPOSTAS = 5;
 /** Colunas de variável, fixas para que o cabeçalho não mude entre campanhas. */
 export const MAX_VARIAVEIS = 7;
 
-export type TipoResposta =
-  | "texto"
-  | "imagem"
-  | "audio"
-  | "video"
-  | "documento"
-  | "figurinha"
-  | "outro";
+/*
+ * `TipoResposta` mora no domínio, não aqui: a mesma união classifica a resposta
+ * no CSV e no painel, e duas cópias seriam duas listas que divergem no dia em
+ * que o WhatsApp ganhar mais um tipo de mensagem.
+ */
+export type { TipoResposta } from "@disparoy/dominio";
 
 export interface RespostaDoContato {
   texto: string;

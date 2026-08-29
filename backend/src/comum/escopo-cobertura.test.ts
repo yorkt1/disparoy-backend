@@ -115,7 +115,9 @@ const ORCAMENTO: Record<string, number> = {
    * `obter()`, que é escopado e lança `NotFoundException` para campanha de
    * outra empresa — `campanhas.test.ts` guarda isso. `exigirCanaisProntos` lê
    * `canais` depois de `canais.exigirAcesso`, que confere a empresa antes do
-   * papel.
+   * papel. `textosDasRespostas` e `publicoDaCampanha` entram pela mesma porta:
+   * as duas filtram por `campanha_id` e só são chamadas por métodos que já
+   * passaram por `obter()` — quem não é dono da campanha nem chega no id.
    *
    * `canais`: mesma coisa via `obter()`/`exigirAcesso()`. `isolamento.test.ts`
    * cobre esses caminhos, inclusive o furo do vínculo cruzado em
@@ -125,7 +127,7 @@ const ORCAMENTO: Record<string, number> = {
    * `isolamento.test.ts` prova que o admin de uma empresa não redefine senha
    * nem desativa acesso de outra.
    */
-  "campanhas/campanhas.service.ts": 7,
+  "campanhas/campanhas.service.ts": 9,
   "canais/canais.service.ts": 7,
   "spintax/spintax.service.ts": 1,
   "templates/templates.service.ts": 2,
