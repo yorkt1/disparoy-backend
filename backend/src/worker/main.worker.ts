@@ -3,6 +3,7 @@ import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { WorkerModule } from "./worker.module";
 import { DisparoService } from "./disparo.service";
+import { ManutencaoService } from "./manutencao.service";
 import { ObservabilidadeService } from "../observabilidade/observabilidade.service";
 import {
   FILA_CAMPANHA,
@@ -42,6 +43,7 @@ async function iniciar() {
 
   const fila = app.get(FilaService);
   const disparo = app.get(DisparoService);
+  const manutencao = app.get(ManutencaoService);
   const observabilidade = app.get(ObservabilidadeService);
   const boss = fila.instancia();
 
@@ -91,7 +93,7 @@ async function iniciar() {
    * ficou em "enviando" nunca mais sai de lá e a campanha não conclui.
    */
   await boss.work(FILA_MANUTENCAO, { batchSize: 1 }, async () => {
-    await disparo.manutencao();
+    await manutencao.executar();
   });
   await fila.agendarManutencao();
 

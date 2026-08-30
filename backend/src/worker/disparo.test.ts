@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DisparoService } from "./disparo.service";
+import { ManutencaoService } from "./manutencao.service";
 import { LimitesService } from "../comum/limites.service";
 import { LIMITES_POR_PLANO, PLANO_PADRAO } from "../comum/limites-empresa";
 import type { AuditoriaService } from "../auditoria/auditoria.service";
@@ -204,7 +205,17 @@ function montar(banco: Banco, rpcs: Record<string, (args: Registro) => unknown> 
     fila as unknown as FilaService,
     limites,
   );
-  return { disparo, fila, chamadas, limites };
+  // A manutenção saiu do DisparoService, mas divide o mesmo dublê de banco:
+  // vários cenários aqui exercitam o planejamento E a faxina que o conserta,
+  // e separá-los em dois `montar` faria cada teste montar dois bancos que
+  // precisariam ser mantidos iguais à mão.
+  const manutencao = new ManutencaoService(
+    servico,
+    auditoriaFalsa,
+    {} as unknown as WhatsappService,
+    fila as unknown as FilaService,
+  );
+  return { disparo, manutencao, fila, chamadas, limites };
 }
 
 // ===========================================================================
@@ -222,7 +233,7 @@ describe("campanha agendada continua executável (cenários B, C e D)", () => {
    * now()` vive no SQL e está coberto na revisão da migration, não aqui.
    */
   it("a manutenção reenfileira toda campanha agendada e vencida", async () => {
-    const { disparo, fila } = montar(
+    const { manutencao, fila } = montar(
       { campanhas: [], campanha_contatos: [], canais: [] },
       {
         reivindicar_agendamentos_vencidos: () => [
@@ -232,7 +243,7 @@ describe("campanha agendada continua executável (cenários B, C e D)", () => {
       },
     );
 
-    await disparo.manutencao();
+    await manutencao.executar();
 
     expect(fila.reenfileirarAgendamento).toHaveBeenCalledTimes(2);
     expect(fila.reenfileirarAgendamento).toHaveBeenCalledWith(CAMPANHA, 0);
@@ -254,22 +265,22 @@ describe("campanha agendada continua executável (cenários B, C e D)", () => {
    * rodada de manutenção, e não uma vez no boot.
    */
   it("a reconciliação de agendamentos roda em toda manutenção", async () => {
-    const { disparo, chamadas } = montar({ campanhas: [], canais: [] });
+    const { manutencao, chamadas } = montar({ campanhas: [], canais: [] });
 
-    await disparo.manutencao();
-    await disparo.manutencao();
+    await manutencao.executar();
+    await manutencao.executar();
 
     const vezes = chamadas.filter((c) => c.nome === "reivindicar_agendamentos_vencidos").length;
     expect(vezes).toBe(2);
   });
 
   it("nada é enfileirado quando não há agendamento vencido", async () => {
-    const { disparo, fila } = montar(
+    const { manutencao, fila } = montar(
       { campanhas: [], canais: [] },
       { reivindicar_agendamentos_vencidos: () => [] },
     );
 
-    await disparo.manutencao();
+    await manutencao.executar();
 
     expect(fila.reenfileirarAgendamento).not.toHaveBeenCalled();
   });
@@ -289,15 +300,14 @@ describe("campanha agendada continua executável (cenários B, C e D)", () => {
         : original(nome, args);
 
     const fila = filaFalsa();
-    const disparo = new DisparoService(
+    const manutencao = new ManutencaoService(
       servico,
       auditoriaFalsa,
       {} as unknown as WhatsappService,
       fila as unknown as FilaService,
-      new LimitesService(servico),
     );
 
-    await expect(disparo.manutencao()).resolves.toBeUndefined();
+    await expect(manutencao.executar()).resolves.toBeUndefined();
     // Chegou até o fim: a limpeza de cotas é a última coisa da rotina.
     expect(chamadas.some((c) => c.nome === "limpar_cotas_empresa_antigas")).toBe(true);
   });
@@ -540,7 +550,7 @@ describe("agendamento expirado", () => {
    */
   it("a manutenção expira o que passou da tolerância antes de reenfileirar", async () => {
     const ordem: string[] = [];
-    const { disparo, fila } = montar(
+    const { manutencao, fila } = montar(
       { campanhas: [], campanha_contatos: [], canais: [] },
       {
         expirar_agendamentos_vencidos: () => {
@@ -562,7 +572,7 @@ describe("agendamento expirado", () => {
       },
     );
 
-    await disparo.manutencao();
+    await manutencao.executar();
 
     // A ordem é o mecanismo: invertidas, a mesma rodada enfileiraria a
     // campanha atrasada e só depois a expiraria — com o job já em voo.
@@ -580,15 +590,14 @@ describe("agendamento expirado", () => {
         : original(nome, args);
 
     const fila = filaFalsa();
-    const disparo = new DisparoService(
+    const manutencao = new ManutencaoService(
       servico,
       auditoriaFalsa,
       {} as unknown as WhatsappService,
       fila as unknown as FilaService,
-      new LimitesService(servico),
     );
 
-    await expect(disparo.manutencao()).resolves.toBeUndefined();
+    await expect(manutencao.executar()).resolves.toBeUndefined();
     // Chegou até o fim: a limpeza de cotas é a última coisa da rotina.
     expect(chamadas.some((c) => c.nome === "limpar_cotas_empresa_antigas")).toBe(true);
   });
@@ -599,9 +608,9 @@ describe("agendamento expirado", () => {
    * reenfileirar campanha da semana passada.
    */
   it("a reivindicação recebe a tolerância junto da carência", async () => {
-    const { disparo, chamadas } = montar({ campanhas: [], canais: [] });
+    const { manutencao, chamadas } = montar({ campanhas: [], canais: [] });
 
-    await disparo.manutencao();
+    await manutencao.executar();
 
     const claim = chamadas.find((c) => c.nome === "reivindicar_agendamentos_vencidos");
     expect(typeof claim?.args.p_tolerancia_minutos).toBe("number");

@@ -7,6 +7,7 @@ import { FilaModule } from "../fila/fila.module";
 import { ObservabilidadeModule } from "../observabilidade/observabilidade.module";
 import { LimitesModule } from "../comum/limites.module";
 import { DisparoService } from "./disparo.service";
+import { ManutencaoService } from "./manutencao.service";
 
 /**
  * Contexto do worker: os mesmos serviços da API, sem controllers HTTP.
@@ -23,6 +24,6 @@ import { DisparoService } from "./disparo.service";
     // A cota diária por empresa é consumida no caminho do envio, aqui dentro.
     LimitesModule,
   ],
-  providers: [DisparoService],
+  providers: [DisparoService, ManutencaoService],
 })
 export class WorkerModule {}

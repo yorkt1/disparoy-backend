@@ -64,7 +64,13 @@ const ORCAMENTO: Record<string, number> = {
    * de propósito (ver o cabeçalho de `comum/escopo.ts`). O isolamento deles é
    * outro: o job carrega o id da campanha, e a campanha carrega a empresa.
    */
-  "worker/disparo.service.ts": 10,
+  "worker/disparo.service.ts": 7,
+  // As mesmas consultas do worker, agora repartidas: a manutenção saiu do
+  // `DisparoService` para um serviço próprio, e o que os dois usam foi para
+  // `execucao.ts`. O total continua 10 — nenhuma consulta nova, nenhuma perdeu
+  // escopo no caminho.
+  "worker/manutencao.service.ts": 2,
+  "worker/execucao.ts": 1,
   "webhooks/evolution.service.ts": 3,
 
   /*
