@@ -517,6 +517,39 @@ describe("isolamento entre empresas — usuários", () => {
     expect(banco.perfis.some((p) => p.email === "roberto@acesso.com")).toBe(false);
   });
 
+  it("admin de empresa não exclui ninguém, nem da própria empresa", async () => {
+    await expect(usuarios.excluir(ADMIN_A, "operador-a", "127.0.0.1")).rejects.toThrow(
+      ForbiddenException,
+    );
+
+    expect(banco.perfis.some((p) => p.id === "operador-a")).toBe(true);
+  });
+
+  it("a conta global exclui, e o perfil some da tabela", async () => {
+    await usuarios.excluir(GLOBAL, "operador-a", "127.0.0.1");
+    expect(banco.perfis.some((p) => p.id === "operador-a")).toBe(false);
+  });
+
+  it("excluir o próprio acesso é barrado", async () => {
+    await expect(usuarios.excluir(GLOBAL, "global", "127.0.0.1")).rejects.toThrow(/próprio acesso/);
+    expect(banco.perfis.some((p) => p.id === "global")).toBe(true);
+  });
+
+  it("excluir o último admin de uma empresa é barrado", async () => {
+    // `admin-a` é o único administrador da empresa A: sem ele, ninguém dela
+    // consegue mais gerenciar canais nem acessos, e exclusão não tem desfazer.
+    await expect(usuarios.excluir(GLOBAL, "admin-a", "127.0.0.1")).rejects.toThrow(
+      /último administrador/,
+    );
+    expect(banco.perfis.some((p) => p.id === "admin-a")).toBe(true);
+  });
+
+  it("com dois admins na empresa, excluir um é permitido", async () => {
+    banco.perfis.push(perfil("admin-a2", EMPRESA_A, "admin"));
+    await usuarios.excluir(GLOBAL, "admin-a2", "127.0.0.1");
+    expect(banco.perfis.some((p) => p.id === "admin-a2")).toBe(false);
+  });
+
   it("`empresaId: null` ESCRITO continua criando administrador de sistema", async () => {
     await usuarios.criar(
       GLOBAL,

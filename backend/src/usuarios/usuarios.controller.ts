@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+} from "@nestjs/common";
 import { z } from "zod";
 import { ajusteUsuarioSchema, novoUsuarioSchema } from "@disparoy/dominio";
 import { IpOrigem, Usuario } from "../auth/usuario.decorator";
@@ -35,5 +45,25 @@ export class UsuariosController {
     @IpOrigem() ip: string,
   ) {
     return { usuario: await this.usuarios.ajustar(autor, id, corpo, ip) };
+  }
+
+  /**
+   * Apaga o acesso. Quem pode é conferido no serviço, não aqui.
+   *
+   * `@SomenteAdmin()` da classe não basta: o admin de cada empresa passa nele,
+   * e exclusão é só da conta de administração. A trava fica junto das outras
+   * regras de exclusão, em `excluir`, para não haver dois lugares dizendo quem
+   * pode — que é como um dos dois fica para trás.
+   *
+   * `204` porque não sobra nada para devolver: o recurso deixou de existir.
+   */
+  @Delete(":id")
+  @HttpCode(204)
+  async excluir(
+    @Usuario() autor: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+  ): Promise<void> {
+    await this.usuarios.excluir(autor, id, ip);
   }
 }

@@ -482,7 +482,17 @@ export type AcaoLog =
   | "usuario.senha_redefinida"
   | "usuario.senha_alterada"
   | "usuario.desativado"
-  | "usuario.reativado";
+  | "usuario.reativado"
+  /**
+   * O acesso deixou de existir, e não apenas de funcionar.
+   *
+   * Separado de `usuario.desativado` porque a pergunta que ele responde é
+   * outra: desativado ainda está na lista, dá para reativar e o e-mail
+   * continua ocupado; excluído sumiu, e a única memória de que aquela pessoa
+   * teve acesso é esta linha. `entidadeRotulo` guarda nome e e-mail justamente
+   * por isso — o perfil não existe mais para consultar depois.
+   */
+  | "usuario.excluido";
 
 export type TipoEntidade =
   | "campanha"

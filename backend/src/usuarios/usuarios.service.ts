@@ -12,7 +12,7 @@ import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { COLUNAS_PERFIL, paraUsuario, type LinhaPerfil } from "../comum/mapeadores";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
-import { gerarHash, motivoSenhaFraca } from "../auth/senha";
+import { gerarHash } from "../auth/senha";
 import { noEscopo } from "../comum/escopo";
 
 @Injectable()
@@ -55,12 +55,22 @@ export class UsuariosService {
   ): Promise<Usuario> {
     const email = dados.email.trim().toLowerCase();
 
-    // `senhaSchema` só mede comprimento, e o mínimo dele é 6: `123456` passava
-    // e virava a senha definitiva de um acesso que enxerga a base inteira de
-    // contatos. O teto de tentativas do login atrasa a força bruta, não a
-    // impede.
-    const fraca = motivoSenhaFraca(dados.senha, { email, nome: dados.nome });
-    if (fraca) throw new BadRequestException(fraca);
+    /*
+     * A senha que o admin define para outra pessoa NÃO passa por
+     * `motivoSenhaFraca`. Foi decisão do dono do produto, em 30/08/2026, para
+     * poder entregar uma senha padrão curta e igual em todos os acessos.
+     *
+     * O que isso custa, para quem for reabrir: `senhaSchema` só mede
+     * comprimento, e o mínimo dele é 6 — então `123456` é aceito e vira a senha
+     * definitiva de um acesso que enxerga a base inteira de contatos de uma
+     * empresa e dispara em nome do WhatsApp dela. Sendo a mesma senha em todas
+     * as empresas, descobrir uma é entrar em todas, e o teto de tentativas do
+     * login atrasa a força bruta sem impedi-la.
+     *
+     * `motivoSenhaFraca` continua existindo e continua valendo em
+     * `sessao.service.trocarPropriaSenha`: quando a pessoa escolhe a PRÓPRIA
+     * senha, há alguém do outro lado para escolher outra.
+     */
 
     /*
      * Criar acesso é da conta de administração, e só dela.
@@ -189,8 +199,8 @@ export class UsuariosService {
         );
       }
 
-      const fraca = motivoSenhaFraca(dados.senha, { email: alvo.email, nome: alvo.nome });
-      if (fraca) throw new BadRequestException(fraca);
+      // Sem verificação de senha fraca, pelo mesmo motivo registrado em
+      // `criar`: a senha padrão do produto é curta e repetida de propósito.
     }
 
     // Sem e-mail de recuperação, é por aqui que alguém que esqueceu a senha
@@ -224,6 +234,87 @@ export class UsuariosService {
     });
 
     return this.obterNoEscopo(autor, id);
+  }
+
+  /**
+   * Apaga o acesso de vez — a linha some de `perfis`.
+   *
+   * Existe ao lado de desativar, e não no lugar dele, porque são respostas a
+   * problemas diferentes. Desativar é para quem talvez volte: o histórico fica
+   * na lista, o e-mail continua ocupado e reativar é um clique. Excluir é para
+   * o acesso que nunca deveria ter existido — o cadastro de teste, o e-mail
+   * digitado errado, a empresa que desistiu antes de começar. Sem esta rota,
+   * esses três ficam para sempre na tela, desativados, e a lista de acessos
+   * vira um cemitério que atrapalha achar quem importa.
+   *
+   * O que NÃO se perde junto: a trilha de auditoria. `logs_auditoria` não
+   * referencia `perfis` e guarda `usuario_nome` copiado na linha, de propósito
+   * — o que essa pessoa fez continua registrado depois de ela sumir. As duas
+   * tabelas que referenciam o perfil (`canal_membros` e a caixa de avisos) têm
+   * `on delete cascade`, então o vínculo com canais e os avisos pessoais somem
+   * junto, que é o desejado: são coisas que só fazem sentido com o dono vivo.
+   */
+  async excluir(autor: UsuarioAutenticado, id: string, ip: string): Promise<void> {
+    /*
+     * Exclusão é da conta de administração, e só dela.
+     *
+     * Mais restrito que desativar, que qualquer admin faz na própria empresa,
+     * e é de propósito: desativar tem volta, excluir não tem. Um admin de
+     * empresa irritado apagando a própria equipe é um estrago sem desfazer, e
+     * o cliente ligaria para você — que é quem tem o banco — para consertar.
+     */
+    if (autor.empresaId !== null) {
+      throw new ForbiddenException(
+        "Apenas a conta de administração exclui acessos. Desative o acesso em vez de excluir.",
+      );
+    }
+
+    const alvo = await this.obterNoEscopo(autor, id);
+
+    // Excluir a si mesmo é o único jeito de sair do sistema sem ninguém para
+    // te readmitir: não há auto-cadastro e não há e-mail de recuperação.
+    if (autor.id === id) {
+      throw new BadRequestException("Você não pode excluir o próprio acesso.");
+    }
+
+    // A mesma trava de desativar: uma empresa sem administrador não tem
+    // caminho de volta pelo produto, e aqui nem desfazer existe.
+    if (alvo.papel === "admin") {
+      await this.exigirOutroAdminAtivo(id);
+    }
+
+    /*
+     * A auditoria é gravada ANTES do delete, e não depois.
+     *
+     * Depois, `alvo` já não existe para consultar, e um erro entre as duas
+     * operações deixaria o acesso apagado sem registro nenhum de quem apagou —
+     * exatamente a linha que se vai procurar quando alguém perguntar "cadê o
+     * login do fulano?". Na ordem inversa, o pior caso é uma linha de
+     * auditoria para uma exclusão que falhou, que é visível e explicável.
+     */
+    await this.auditoria.registrar({
+      usuarioId: autor.id,
+      usuarioNome: autor.nome,
+      acao: "usuario.excluido",
+      tipoEntidade: "usuario",
+      entidadeId: id,
+      entidadeRotulo: `${alvo.nome} <${alvo.email}>`,
+      ip,
+      detalhes: { papel: alvo.papel, ativo: alvo.ativo },
+    });
+
+    /*
+     * `noEscopo` mesmo sendo exclusivo da conta global, para quem ele é um
+     * no-op: se um dia a trava lá em cima afrouxar — um admin de empresa
+     * ganhando o direito de excluir a própria gente —, este DELETE já nasce
+     * incapaz de alcançar outra empresa. Sem ele, afrouxar a trava viraria
+     * apagar perfil de cliente alheio com um uuid vindo da URL.
+     */
+    const { error } = await noEscopo(
+      this.supabase.tabela("perfis").delete().eq("id", id),
+      autor,
+    );
+    if (error) throw new Error(`Falha ao excluir usuário: ${error.message}`);
   }
 
   /**
