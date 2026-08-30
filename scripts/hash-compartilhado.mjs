@@ -35,6 +35,21 @@ const ARQUIVO_HASH = join(RAIZ, "shared", "HASH.txt");
 function listar(diretorio) {
   const encontrados = [];
   for (const nome of readdirSync(diretorio).sort()) {
+    /*
+     * Diretório oculto fica de fora.
+     *
+     * O hash existe para comparar o que os DOIS repositórios versionam, e o CI
+     * o recalcula sobre um clone limpo. Ferramentas locais que gravam dentro
+     * de `shared/src` — foi o `.claude-flow/` que apareceu ali — entram no
+     * cálculo da máquina de quem edita e não existem no clone do CI: a
+     * verificação passa a falhar localmente sem nada versionado ter mudado.
+     *
+     * Pior desfecho: rodar `compartilhado:gravar` com esse lixo dentro grava
+     * um hash que o CI não consegue reproduzir, e a guarda passa a reprovar
+     * todo commit por um arquivo que nem está no repositório.
+     */
+    if (nome.startsWith(".")) continue;
+
     const caminho = join(diretorio, nome);
     if (statSync(caminho).isDirectory()) encontrados.push(...listar(caminho));
     else encontrados.push(caminho);
