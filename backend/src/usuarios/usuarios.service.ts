@@ -1,4 +1,10 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import { z } from "zod";
 import type { AcaoLog, Usuario } from "@disparoy/dominio";
 import type { ajusteUsuarioSchema, novoUsuarioSchema } from "@disparoy/dominio";
@@ -57,17 +63,37 @@ export class UsuariosService {
     if (fraca) throw new BadRequestException(fraca);
 
     /*
-     * A qual empresa o novo acesso pertence.
+     * Criar acesso é da conta de administração, e só dela.
      *
-     * A conta de administração é global e escolhe: é ela que cria o login de
-     * cada empresa cliente. Um admin DE UMA empresa só cria gente na própria —
-     * aceitar `empresaId` dele seria deixá-lo plantar um acesso dentro de
-     * outra empresa.
-     *
-     * `null` só é possível pela conta global, e cria outra conta global: é
-     * assim que se faz um segundo administrador de sistema.
+     * `@SomenteAdmin()` no controller não basta: cada empresa cliente tem o
+     * próprio admin, e `papel === "admin"` não distingue o dono do sistema do
+     * administrador de um cliente. Quem entrega login é quem cobra por ele.
      */
-    const empresaId = autor.empresaId === null ? (dados.empresaId ?? null) : autor.empresaId;
+    if (autor.empresaId !== null) {
+      throw new ForbiddenException(
+        "Apenas a conta de administração cria acessos. Peça um login ao administrador do sistema.",
+      );
+    }
+
+    /*
+     * A empresa do novo acesso é OBRIGATÓRIA de vir no corpo, e a distinção
+     * entre `undefined` e `null` é o ponto inteiro deste bloco.
+     *
+     * Antes, campo ausente virava `null` por um `??`, e `null` é acesso GLOBAL:
+     * a tela de Usuários, que nunca mandou `empresaId`, criava clientes que
+     * enxergavam canal, campanha e dashboard de todas as empresas. Ninguém
+     * percebia, porque nada falhava — o acesso funcionava, só que vendo demais.
+     *
+     * Agora "esqueci de dizer a empresa" (`undefined`) é erro na primeira
+     * tentativa, e só um `null` ESCRITO no corpo cria outra conta global, que
+     * é como se faz um segundo administrador de sistema.
+     */
+    if (dados.empresaId === undefined) {
+      throw new BadRequestException(
+        "Informe a empresa deste acesso. Crie o login pela tela de Empresas.",
+      );
+    }
+    const empresaId = dados.empresaId;
 
     if (empresaId !== null) {
       const { data: existe } = await this.supabase

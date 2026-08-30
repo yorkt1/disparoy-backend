@@ -419,4 +419,67 @@ describe("isolamento entre empresas — usuários", () => {
     await usuarios.ajustar(ADMIN_A, "admin-a2", { papel: "operator" }, "127.0.0.1");
     expect(banco.perfis.find((p) => p.id === "admin-a2")?.papel).toBe("operator");
   });
+
+  /*
+   * Os três abaixo cobrem a CRIAÇÃO, que era o buraco.
+   *
+   * O resto deste arquivo prova que ninguém LÊ dentro da empresa vizinha. Não
+   * provava nada sobre de quem é o acesso que acabou de nascer — e foi por ali
+   * que vazou: a tela de Usuários chamava `criar` sem `empresaId`, o `??` de
+   * antes transformava o campo ausente em `null`, e `null` é acesso GLOBAL.
+   * O cliente entrava e via canal, campanha e dashboard de todas as empresas,
+   * sem nada falhar em lugar nenhum.
+   */
+
+  it("admin de empresa não cria acesso nenhum, nem na própria empresa", async () => {
+    await expect(
+      usuarios.criar(
+        ADMIN_A,
+        {
+          nome: "Novo",
+          email: "novo@exemplo.com",
+          senha: "Trovao-Marulho-92",
+          papel: "operator",
+          empresaId: EMPRESA_A,
+        },
+        "127.0.0.1",
+      ),
+    ).rejects.toThrow(ForbiddenException);
+
+    expect(banco.perfis.some((p) => p.email === "novo@exemplo.com")).toBe(false);
+  });
+
+  it("a conta global sem empresa no corpo é recusada, em vez de criar outro acesso global", async () => {
+    await expect(
+      usuarios.criar(
+        GLOBAL,
+        {
+          nome: "Roberto",
+          email: "roberto@acesso.com",
+          senha: "Trovao-Marulho-92",
+          papel: "admin",
+        },
+        "127.0.0.1",
+      ),
+    ).rejects.toThrow(/Informe a empresa/);
+
+    expect(banco.perfis.some((p) => p.email === "roberto@acesso.com")).toBe(false);
+  });
+
+  it("`empresaId: null` ESCRITO continua criando administrador de sistema", async () => {
+    await usuarios.criar(
+      GLOBAL,
+      {
+        nome: "Suporte",
+        email: "suporte@exemplo.com",
+        senha: "Trovao-Marulho-92",
+        papel: "admin",
+        empresaId: null,
+      },
+      "127.0.0.1",
+    );
+
+    const criado = banco.perfis.find((p) => p.email === "suporte@exemplo.com");
+    expect(criado?.empresa_id).toBeNull();
+  });
 });
