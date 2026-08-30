@@ -492,7 +492,17 @@ export type AcaoLog =
    * teve acesso é esta linha. `entidadeRotulo` guarda nome e e-mail justamente
    * por isso — o perfil não existe mais para consultar depois.
    */
-  | "usuario.excluido";
+  | "usuario.excluido"
+  /**
+   * A conta de administração entrou no painel como outra pessoa.
+   *
+   * É o evento mais sensível da trilha: a partir dele, tudo que aparecer no
+   * nome do cliente pode ter sido feito pelo suporte. Registrado no momento em
+   * que o token é emitido, e não a cada ação, porque é a ENTRADA que precisa
+   * ser rastreável — as ações seguintes carregam "(via Fulano)" no próprio
+   * `usuario_nome`.
+   */
+  | "usuario.personificado";
 
 export type TipoEntidade =
   | "campanha"

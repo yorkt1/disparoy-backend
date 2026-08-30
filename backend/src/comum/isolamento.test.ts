@@ -296,7 +296,7 @@ function usuario(
   empresaId: string | null,
   papel: "admin" | "operator",
 ): UsuarioAutenticado {
-  return { id, email: `${id}@exemplo.com`, nome: id, papel, empresaId };
+  return { id, email: `${id}@exemplo.com`, nome: id, papel, empresaId, personificadoPor: null };
 }
 
 const ADMIN_A = usuario("admin-a", EMPRESA_A, "admin");

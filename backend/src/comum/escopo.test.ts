@@ -4,7 +4,7 @@ import type { UsuarioAutenticado } from "../auth/auth.guard";
 import { empresaParaEscrita, noEscopo } from "./escopo";
 
 function usuario(empresaId: string | null): UsuarioAutenticado {
-  return { id: "u1", email: "a@b.c", nome: "Fulano", papel: "operator", empresaId };
+  return { id: "u1", email: "a@b.c", nome: "Fulano", papel: "operator", empresaId, personificadoPor: null };
 }
 
 /** Espião no formato mínimo que `noEscopo` usa do builder do supabase-js. */

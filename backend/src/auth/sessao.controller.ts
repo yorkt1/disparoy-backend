@@ -1,4 +1,12 @@
-import { Body, Controller, HttpCode, Patch, Post } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+} from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import { z } from "zod";
 import { loginSchema } from "@disparoy/dominio";
@@ -52,6 +60,27 @@ export class SessaoController {
    * tentando adivinhá-la aqui, e o efeito de acertar é o mesmo de acertar no
    * login — só que sem o e-mail para descobrir.
    */
+  /**
+   * Entra no painel como outra pessoa. Só a conta de administração.
+   *
+   * Fica em `/sessao` e não em `/usuarios/:id/...` porque o que ela devolve é
+   * uma SESSÃO — token e validade —, e não um usuário. Quem pode é conferido
+   * no serviço, junto das outras regras.
+   *
+   * Teto próprio: emitir sessão de terceiro é a ação mais poderosa da API, e
+   * uma frequência alta aqui não é uso normal — é alguém varrendo uuids.
+   */
+  @Post("personificar/:id")
+  @HttpCode(200)
+  @Throttle({ curta: { ttl: 60_000, limit: 10 }, longa: { ttl: 900_000, limit: 60 } })
+  async personificar(
+    @Usuario() usuario: UsuarioAutenticado,
+    @Param("id", ParseUUIDPipe) id: string,
+    @IpOrigem() ip: string,
+  ) {
+    return this.sessao.personificar(usuario, id, ip);
+  }
+
   @Patch("senha")
   @HttpCode(204)
   @Throttle({ curta: { ttl: 60_000, limit: 10 }, longa: { ttl: 900_000, limit: 60 } })

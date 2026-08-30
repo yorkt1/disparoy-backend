@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseService } from "../supabase/supabase.service";
 import type { AuditoriaService } from "../auditoria/auditoria.service";
 import type { FreioService } from "../comum/freio.service";
+import type { UsuarioAutenticado } from "./auth.guard";
 import { gerarHash } from "./senha";
 import { SessaoService } from "./sessao.service";
 
@@ -214,5 +215,101 @@ describe("freio por conta", () => {
     await sessao.entrar(PERFIL.email, "cavalo-bateria-grampo", "1.2.3.4");
     expect(freio.chamadas.limpezas).toBe(1);
     expect(freio.chamadas.falhasRegistradas).toBe(0);
+  });
+});
+
+/**
+ * Personificação — entrar no painel como outra pessoa, sem a senha dela.
+ *
+ * A rota existe para o suporte não precisar pedir a senha do cliente por
+ * WhatsApp, que é o que se fazia sem ela. O que estes testes seguram é que ela
+ * não vire outra coisa: um caminho para o admin de uma empresa alcançar a
+ * conta de um concorrente, ou para contornar a desativação de um acesso.
+ *
+ * O que NÃO dá para testar aqui é o efeito na auditoria — ele acontece no
+ * `AuthGuard`, ao emendar "(via Fulano)" no nome, e não neste serviço.
+ */
+describe("personificação", () => {
+  const ALVO = {
+    ...PERFIL,
+    id: "22222222-2222-2222-2222-222222222222",
+    nome: "Cliente",
+    email: "acesso@cliente.com",
+    empresa_id: "33333333-3333-3333-3333-333333333333",
+  };
+
+  function global(patch: Partial<UsuarioAutenticado> = {}): UsuarioAutenticado {
+    return {
+      id: "11111111-1111-1111-1111-111111111111",
+      nome: "Gui",
+      email: "acesso@admin.com",
+      papel: "admin",
+      empresaId: null,
+      personificadoPor: null,
+      ...patch,
+    };
+  }
+
+  function servicoCom(linha: LinhaFalsa) {
+    return new SessaoService(supabaseCom(linha), auditoriaMuda, freioFalso().servico);
+  }
+
+  it("a conta global recebe um token do alvo, marcado com quem entrou", async () => {
+    const sessao = await servicoCom(ALVO).personificar(global(), ALVO.id, "1.2.3.4");
+
+    expect(sessao.usuario.email).toBe("acesso@cliente.com");
+
+    // A marca vive DENTRO do token assinado: é o que impede alguém de agir
+    // como o cliente sem deixar rastro, apagando o cabeçalho.
+    const corpo = JSON.parse(
+      Buffer.from(sessao.token.split(".")[1], "base64url").toString("utf8"),
+    ) as { sub: string; personificadoPor?: { id: string; nome: string } };
+
+    expect(corpo.sub).toBe(ALVO.id);
+    expect(corpo.personificadoPor).toEqual({ id: global().id, nome: "Gui" });
+  });
+
+  it("a sessão personificada expira antes da normal", async () => {
+    // Uma aba esquecida dentro da conta de um cliente por 12 h não se paga por
+    // conveniência nenhuma. Uma hora chega para olhar e sair.
+    const sessao = await servicoCom(ALVO).personificar(global(), ALVO.id, "1.2.3.4");
+    const daquiAUmaHora = Date.now() + 3_600_000;
+
+    expect(new Date(sessao.expiraEm).getTime()).toBeLessThanOrEqual(daquiAUmaHora + 5_000);
+    expect(new Date(sessao.expiraEm).getTime()).toBeGreaterThan(Date.now() + 3_000_000);
+  });
+
+  it("admin de empresa não entra na conta de ninguém", async () => {
+    // `papel: "admin"` não distingue o dono do sistema do administrador de um
+    // cliente. Sem este teste, esta rota daria a cada cliente a conta do outro.
+    const adminDeEmpresa = global({ empresaId: "44444444-4444-4444-4444-444444444444" });
+
+    await expect(
+      servicoCom(ALVO).personificar(adminDeEmpresa, ALVO.id, "1.2.3.4"),
+    ).rejects.toThrow(/conta de administração/);
+  });
+
+  it("quem já está personificando não pula para uma terceira conta", async () => {
+    // A segunda marca sobrescreveria a primeira, e o "via" passaria a apontar
+    // para o cliente em vez de para quem realmente entrou.
+    const jaDentro = global({ personificadoPor: { id: "x", nome: "Alguém" } });
+
+    await expect(servicoCom(ALVO).personificar(jaDentro, ALVO.id, "1.2.3.4")).rejects.toThrow(
+      /já está dentro de outra conta/,
+    );
+  });
+
+  it("acesso desativado não pode ser personificado", async () => {
+    // Senão esta rota vira o jeito de contornar a desativação, que é o botão
+    // que corta o acesso de alguém na hora.
+    await expect(
+      servicoCom({ ...ALVO, ativo: false }).personificar(global(), ALVO.id, "1.2.3.4"),
+    ).rejects.toThrow(/desativado/);
+  });
+
+  it("perfil inexistente devolve 404, não um token", async () => {
+    await expect(servicoCom(null).personificar(global(), ALVO.id, "1.2.3.4")).rejects.toThrow(
+      /não encontrado/,
+    );
   });
 });

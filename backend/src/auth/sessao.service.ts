@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from "@nestjs/common";
 import { SignJWT } from "jose";
@@ -12,6 +14,7 @@ import { AuditoriaService } from "../auditoria/auditoria.service";
 import { FreioService } from "../comum/freio.service";
 import { ambiente, segredoJwt } from "../config/ambiente";
 import { COLUNAS_PERFIL, paraUsuario, type LinhaPerfil } from "../comum/mapeadores";
+import { noEscopo } from "../comum/escopo";
 import { conferirSenha, gerarHash, motivoSenhaFraca } from "./senha";
 import type { UsuarioAutenticado } from "./auth.guard";
 
@@ -199,11 +202,24 @@ export class SessaoService {
    * O `AuthGuard` relê `perfis` a cada request justamente para que promover ou
    * desativar alguém tenha efeito imediato, sem esperar o token virar.
    */
-  private async assinar(id: string, papel: Papel): Promise<{ token: string; expiraEm: string }> {
-    const horas = ambiente().SESSAO_HORAS;
+  private async assinar(
+    id: string,
+    papel: Papel,
+    /** Presente só na personificação; vai assinado dentro do token. */
+    personificadoPor?: { id: string; nome: string },
+  ): Promise<{ token: string; expiraEm: string }> {
+    /*
+     * A sessão personificada dura MENOS que a normal.
+     *
+     * `SESSAO_HORAS` é dimensionado para quem trabalha o dia dentro do painel.
+     * Personificar é entrar, olhar o que o cliente está vendo e sair — e o
+     * risco de esquecer uma aba aberta dentro da conta de um cliente por 12 h,
+     * num navegador compartilhado, não se paga por nenhuma conveniência.
+     */
+    const horas = personificadoPor ? 1 : ambiente().SESSAO_HORAS;
     const expiraEm = new Date(Date.now() + horas * 3_600_000);
 
-    const token = await new SignJWT({ papel })
+    const token = await new SignJWT({ papel, ...(personificadoPor ? { personificadoPor } : {}) })
       .setProtectedHeader({ alg: "HS256" })
       .setSubject(id)
       .setIssuedAt()
@@ -212,5 +228,99 @@ export class SessaoService {
       .sign(segredoJwt());
 
     return { token, expiraEm: expiraEm.toISOString() };
+  }
+
+  /**
+   * Entra no painel COMO outra pessoa, sem a senha dela.
+   *
+   * Existe para o suporte: descobrir por que o canal do cliente não conecta,
+   * ou por que a campanha dele não saiu, sem pedir a senha por WhatsApp — que
+   * é o que se faria sem isto, e que é bem pior do que esta rota.
+   *
+   * A sessão emitida é a do ALVO: mesmas permissões, mesma empresa, mesma
+   * tela. O que ela carrega a mais é a marca de quem entrou, que o `AuthGuard`
+   * usa para emendar "(via Fulano)" no nome — de modo que tudo que for feito
+   * daqui para frente apareça na auditoria como o que é. Sem essa marca, esta
+   * rota apagaria a diferença entre o cliente e o suporte, e a trilha deixaria
+   * de responder a pergunta para a qual ela existe.
+   */
+  async personificar(
+    autor: UsuarioAutenticado,
+    alvoId: string,
+    ip: string,
+  ): Promise<SessaoCriada> {
+    /*
+     * Só a conta de administração, e o teste é por EMPRESA, não por papel.
+     *
+     * `papel === "admin"` não serve: cada empresa cliente tem o próprio admin,
+     * e deixá-lo personificar seria dar a ele a conta de qualquer colega — e,
+     * se o alvo fosse de outra empresa, a de um cliente concorrente.
+     */
+    if (autor.empresaId !== null) {
+      throw new ForbiddenException("Apenas a conta de administração entra em outras contas.");
+    }
+
+    // Personificar quem já está personificando é como o rastro se perde: a
+    // segunda marca sobrescreveria a primeira e o "via" apontaria para o
+    // cliente, não para quem de fato começou.
+    if (autor.personificadoPor) {
+      throw new BadRequestException(
+        "Você já está dentro de outra conta. Volte para a sua antes de entrar em outra.",
+      );
+    }
+
+    if (autor.id === alvoId) {
+      throw new BadRequestException("Você já está na sua própria conta.");
+    }
+
+    /*
+     * `noEscopo` é um no-op para a conta global — que é a única que chega
+     * aqui — e é justamente por isso que ele fica: atravessar as empresas é o
+     * PONTO desta rota, e escrever isso explicitamente diz que a ausência de
+     * filtro foi decidida, não esquecida. Se um dia a trava lá em cima
+     * afrouxar, quem entrar já fica confinado à própria empresa em vez de
+     * alcançar a conta de um cliente concorrente com um uuid da URL.
+     */
+    const { data, error } = await noEscopo(
+      this.supabase.tabela("perfis").select(COLUNAS_PERFIL).eq("id", alvoId),
+      autor,
+    ).maybeSingle();
+
+    if (error) throw new Error(`Falha ao consultar o perfil: ${error.message}`);
+    if (!data) throw new NotFoundException("Acesso não encontrado.");
+
+    const alvo = paraUsuario(data as unknown as LinhaPerfil);
+
+    // Acesso desativado não entra pelo login; não pode entrar por aqui
+    // tampouco, senão esta rota vira o jeito de contornar a desativação.
+    if (!alvo.ativo) {
+      throw new BadRequestException("Este acesso está desativado. Reative-o antes de entrar nele.");
+    }
+
+    /*
+     * A auditoria é gravada com o autor REAL e antes de o token existir.
+     *
+     * É a única linha da trilha que nomeia quem entrou — as ações seguintes
+     * saem no nome do cliente com "(via Fulano)" emendado. Se esta gravação
+     * ficasse depois, uma falha entre as duas emitiria um token de suporte sem
+     * registro nenhum de que ele foi emitido.
+     */
+    await this.auditoria.registrar({
+      usuarioId: autor.id,
+      usuarioNome: autor.nome,
+      acao: "usuario.personificado",
+      tipoEntidade: "usuario",
+      entidadeId: alvo.id,
+      entidadeRotulo: `${alvo.nome} <${alvo.email}>`,
+      ip,
+      detalhes: { papel: alvo.papel },
+    });
+
+    const { token, expiraEm } = await this.assinar(alvo.id, alvo.papel, {
+      id: autor.id,
+      nome: autor.nome,
+    });
+
+    return { token, expiraEm, usuario: alvo };
   }
 }

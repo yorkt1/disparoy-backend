@@ -30,6 +30,17 @@ export interface UsuarioAutenticado {
    * explicitamente anulável.
    */
   empresaId: string | null;
+  /**
+   * Quem, de verdade, está por trás desta sessão.
+   *
+   * Preenchido só quando a conta de administração entrou como outra pessoa
+   * para dar suporte. `null` — o caso normal — é a pessoa sendo ela mesma.
+   *
+   * O painel lê isto para pintar a tarja de "você está dentro da conta de
+   * alguém", que é o que impede o suporte de esquecer onde está e mexer numa
+   * campanha achando que é a própria.
+   */
+  personificadoPor: { id: string; nome: string } | null;
 }
 
 declare module "express" {
@@ -68,8 +79,8 @@ export class AuthGuard implements CanActivate {
     const token = extrairToken(req);
     if (!token) throw new UnauthorizedException("Token de acesso ausente.");
 
-    const { sub } = await this.validarToken(token);
-    const usuario = await this.resolverPerfil(sub);
+    const { sub, personificadoPor } = await this.validarToken(token);
+    const usuario = personificar(await this.resolverPerfil(sub), personificadoPor);
     req.usuario = usuario;
 
     const exigidos = this.reflector.getAllAndOverride<Papel[]>(PAPEIS_EXIGIDOS, alvos);
@@ -86,7 +97,10 @@ export class AuthGuard implements CanActivate {
    * `algorithms` fixo em HS256 de propósito: sem essa trava, um token com
    * `alg: none` no cabeçalho seria aceito como válido.
    */
-  private async validarToken(token: string): Promise<{ sub: string }> {
+  private async validarToken(token: string): Promise<{
+    sub: string;
+    personificadoPor: { id: string; nome: string } | null;
+  }> {
     try {
       const { payload } = await jwtVerify(token, segredoJwt(), {
         algorithms: ["HS256"],
@@ -94,7 +108,23 @@ export class AuthGuard implements CanActivate {
       });
       const sub = String(payload.sub ?? "");
       if (!sub) throw new Error("sub ausente");
-      return { sub };
+
+      /*
+       * Quem personificou vem DENTRO do token, assinado, e não de um cabeçalho
+       * ou do corpo: é o que impede alguém de forjar "sou o suporte" — ou, pior,
+       * de apagar a marca e agir como o cliente sem deixar rastro.
+       *
+       * O nome viaja junto em vez de ser consultado a cada request. Fica
+       * congelado no que era quando o suporte entrou, e isso é o desejado numa
+       * trilha de auditoria: importa quem era naquele momento.
+       */
+      const via = payload.personificadoPor as { id?: unknown; nome?: unknown } | undefined;
+      const personificadoPor =
+        via && typeof via.id === "string" && typeof via.nome === "string"
+          ? { id: via.id, nome: via.nome }
+          : null;
+
+      return { sub, personificadoPor };
     } catch {
       throw new UnauthorizedException("Sessão inválida ou expirada.");
     }
@@ -131,6 +161,10 @@ export class AuthGuard implements CanActivate {
       // `undefined` nos serviços e um filtro condicional o leria como "sem
       // empresa" em vez de "acesso global".
       empresaId: (data.empresa_id as string | null) ?? null,
+      // O cache guarda a pessoa como ela é. A marca de personificação é
+      // aplicada DEPOIS, em `personificar`, porque ela varia por token e não
+      // por perfil — gravá-la aqui contaminaria a sessão real dessa pessoa.
+      personificadoPor: null,
     };
 
     this.cachePerfil.set(id, { valor: usuario, expiraEm: agora + AuthGuard.TTL_CACHE_MS });
@@ -141,6 +175,31 @@ export class AuthGuard implements CanActivate {
   invalidar(perfilId: string): void {
     this.cachePerfil.delete(perfilId);
   }
+}
+
+/**
+ * Marca a sessão como personificada — e é o que mantém a auditoria honesta.
+ *
+ * O `nome` ganha "(via Fulano)" de propósito, e é o truque inteiro desta
+ * funcionalidade. Os 22 pontos que gravam auditoria fazem
+ * `usuarioNome: autor.nome`, e a tabela guarda esse texto copiado na linha.
+ * Emendando aqui, TODA ação feita durante a personificação já sai registrada
+ * como tal, sem tocar em nenhum desses pontos.
+ *
+ * A alternativa seria passar `personificadoPor` por 22 assinaturas até o
+ * `registrar`, e é o mesmo tipo de regra que `EntradaLog.empresaId` já decidiu
+ * não espalhar: um call site esquece, e é justamente a linha que alguém vai
+ * procurar quando perguntar "quem foi que apagou isso?".
+ *
+ * Devolve uma CÓPIA — o objeto original está no cache do guard, compartilhado
+ * com a sessão real dessa pessoa.
+ */
+function personificar(
+  usuario: UsuarioAutenticado,
+  via: { id: string; nome: string } | null,
+): UsuarioAutenticado {
+  if (!via) return usuario;
+  return { ...usuario, nome: `${usuario.nome} (via ${via.nome})`, personificadoPor: via };
 }
 
 function extrairToken(req: Request): string | null {

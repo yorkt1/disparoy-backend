@@ -161,7 +161,7 @@ function campanha(id: string, empresaId: string, status = "em_andamento"): Regis
 }
 
 function usuario(id: string, empresaId: string | null): UsuarioAutenticado {
-  return { id, email: `${id}@exemplo.com`, nome: id, papel: "admin", empresaId };
+  return { id, email: `${id}@exemplo.com`, nome: id, papel: "admin", empresaId, personificadoPor: null };
 }
 
 const ADMIN_A = usuario("admin-a", EMPRESA_A);

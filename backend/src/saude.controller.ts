@@ -70,6 +70,14 @@ export class SaudeController {
          * pertence a nenhuma administra o sistema.
          */
         empresaId: usuario.empresaId,
+        /**
+         * Quem está por trás desta sessão, quando não é a própria pessoa.
+         *
+         * O painel pinta uma tarja fixa a partir disto. Sem ela, o suporte
+         * esquece em qual conta entrou e mexe na campanha de um cliente
+         * achando que é a de outro — e a tela é idêntica nos dois casos.
+         */
+        personificadoPor: usuario.personificadoPor,
       },
       integracao: this.whatsapp.estadoIntegracao(),
       disparo: await this.estadoDisparo(),
