@@ -17,3 +17,6 @@ npm-debug.log*
 
 # Permissões e caminhos absolutos da máquina de quem editou.
 .claude/settings.local.json
+
+# Estado local do claude-flow: sessões e cache da ferramenta, não do projeto.
+.claude-flow/

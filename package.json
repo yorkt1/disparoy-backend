@@ -14,12 +14,17 @@
     "start:api": "npm run start -w @disparoy/backend",
     "start:worker": "npm run start:worker -w @disparoy/backend",
     "test": "npm run test --workspaces --if-present",
+    "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "compartilhado:gravar": "node scripts/hash-compartilhado.mjs --gravar",
     "compartilhado:verificar": "node scripts/hash-compartilhado.mjs --verificar"
   },
   "devDependencies": {
-    "typescript": "^5.7.3"
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.68.0"
   },
   "engines": {
     "node": ">=22.0.0 <23.0.0"

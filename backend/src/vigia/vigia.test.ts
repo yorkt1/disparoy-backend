@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { VigiaWorkerService } from "./vigia-worker.service";
 import type { FilaService } from "../fila/fila.service";
 import type { SupabaseService } from "../supabase/supabase.service";

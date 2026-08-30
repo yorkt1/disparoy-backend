@@ -37,7 +37,7 @@ function linha(parcial: Partial<LinhaRelatorio> = {}): LinhaRelatorio {
 describe("montarCsv", () => {
   it("mantém o cabeçalho e a ordem das colunas", () => {
     const csv = montarCsv([], []);
-    const [cabecalho] = csv.replace("﻿", "").split("\r\n");
+    const [cabecalho] = csv.replace("\uFEFF", "").split("\r\n");
 
     expect(cabecalho).toBe(
       "envio;conexao;nome;whatsapp;lida;resposta_1;resposta_2;resposta_3;resposta_4;" +
@@ -59,7 +59,7 @@ describe("montarCsv", () => {
       [],
     );
 
-    expect(csv.replace("﻿", "").split("\r\n")[1]).toBe(
+    expect(csv.replace("\uFEFF", "").split("\r\n")[1]).toBe(
       "15/08/2026 10:01:39;Antonio Carlos [554791169041];Jucileia;554799599483;Lida;" +
         "Bom dia;Pode contar comigo sim;;;;Enviado com sucesso;;;;;;;",
     );
@@ -72,7 +72,7 @@ describe("montarCsv", () => {
    */
   it("começa com BOM para o Excel ler UTF-8", () => {
     expect(montarCsv([linha({ respostas: [{ texto: "🙌🏻", tipo: "texto" }] })], [])).toMatch(
-      /^﻿/,
+      /^\uFEFF/,
     );
   });
 
@@ -81,7 +81,7 @@ describe("montarCsv", () => {
       texto: `r${i + 1}`,
       tipo: "texto" as const,
     }));
-    const campos = montarCsv([linha({ respostas })], []).replace("﻿", "").split("\r\n")[1]!;
+    const campos = montarCsv([linha({ respostas })], []).replace("\uFEFF", "").split("\r\n")[1]!;
 
     expect(campos.split(";").slice(5, 10)).toEqual(["r1", "r2", "r3", "r4", "r5"]);
   });
@@ -94,7 +94,7 @@ describe("montarCsv", () => {
       linha({ variaveis: { plano: "Prata" } }),
     ];
     const chaves = chavesDeVariaveis(linhas);
-    const [, primeira, segunda] = montarCsv(linhas, chaves).replace("﻿", "").split("\r\n");
+    const [, primeira, segunda] = montarCsv(linhas, chaves).replace("\uFEFF", "").split("\r\n");
 
     expect(chaves).toEqual(["cidade", "plano"]);
     expect(primeira!.split(";").slice(11, 13)).toEqual(["Joinville", "Ouro"]);

@@ -81,7 +81,12 @@ export function montarCsv(linhas: LinhaRelatorio[], chavesVariaveis: string[]): 
   const corpo = linhas.map((linha) => montarLinha(linha, chavesVariaveis));
   // CRLF: é o que o Excel espera, e o que os importadores de CSV toleram sem
   // exceção. LF sozinho funciona na maioria, mas não em todos.
-  return `﻿${[CABECALHO.join(";"), ...corpo].join("\r\n")}\r\n`;
+  //
+  // O BOM vai escrito como `\uFEFF`, e não como o caractere
+  // literal: literal ele é invisível no editor, some numa cópia descuidada e
+  // o Excel volta a abrir "João" como "JoÃ£o" sem que o diff mostre o que
+  // mudou.
+  return `\uFEFF${[CABECALHO.join(";"), ...corpo].join("\r\n")}\r\n`;
 }
 
 /**
