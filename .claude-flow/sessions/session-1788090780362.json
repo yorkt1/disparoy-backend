@@ -1,0 +1,15 @@
+{
+  "id": "session-1788090780362",
+  "startedAt": "2026-08-30T11:53:00.362Z",
+  "cwd": "c:\\Users\\guilh\\Documents\\Projetos\\disparoy-backend",
+  "context": {},
+  "metrics": {
+    "edits": 0,
+    "commands": 0,
+    "tasks": 0,
+    "errors": 0
+  },
+  "restoredAt": "2026-08-30T11:53:00.374Z",
+  "endedAt": "2026-08-30T11:53:01.018Z",
+  "duration": 659
+}

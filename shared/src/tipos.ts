@@ -385,8 +385,16 @@ export interface ContatoDaCampanha {
    * Vazio não quer dizer "não respondeu" — quer dizer que esta consulta não
    * carregou o texto (lista antiga, campanha sem resposta). Quem responde
    * "respondeu?" é `situacao`.
+   *
+   * **Opcional de propósito.** A API sempre manda (`[]` quando não há), mas
+   * painel e API sobem separado — Vercel e Render —, então há sempre uma
+   * janela em que a tela nova conversa com o servidor antigo e o campo chega
+   * `undefined`. Declarar obrigatório fazia a tela inteira cair no limite de
+   * erro com "Cannot read properties of undefined (reading 'length')": o
+   * operador perdia a lista de contatos completa por causa de um campo
+   * acessório. Assim o compilador exige o `?? []` em cada leitura.
    */
-  ultimasRespostas: RespostaRecebida[];
+  ultimasRespostas?: RespostaRecebida[];
   motivo: string | null;
   variaveis: Record<string, string>;
 }
