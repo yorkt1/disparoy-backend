@@ -1,8 +1,10 @@
 import { ForbiddenException, NotFoundException } from "@nestjs/common";
 import { beforeEach, describe, expect, it } from "vitest";
+import { CampanhasService } from "../campanhas/campanhas.service";
 import { CanaisService } from "../canais/canais.service";
 import { UsuariosService } from "../usuarios/usuarios.service";
 import type { AuditoriaService } from "../auditoria/auditoria.service";
+import type { FilaService } from "../fila/fila.service";
 import type { SupabaseService } from "../supabase/supabase.service";
 import type { WhatsappService } from "../whatsapp/whatsapp.service";
 import type { UsuarioAutenticado } from "../auth/auth.guard";
@@ -33,6 +35,7 @@ const EMPRESA_B = "22222222-2222-2222-2222-222222222222";
 type Registro = Record<string, unknown>;
 
 interface Banco {
+  campanhas: Registro[];
   canais: Registro[];
   perfis: Registro[];
   canal_membros: Registro[];
@@ -74,8 +77,42 @@ function perfil(id: string, empresaId: string | null, papel: "admin" | "operator
   };
 }
 
+/** Uma campanha completa o bastante para `paraCampanha` nao quebrar. */
+function campanha(id: string, empresaId: string, nome: string): Registro {
+  return {
+    id,
+    nome,
+    status: "em_andamento",
+    lista_id: null,
+    sequencia: [],
+    intervalo_contatos_min: 30,
+    intervalo_contatos_max: 60,
+    intervalo_mensagens_min: 3,
+    intervalo_mensagens_max: 8,
+    validar_numeros: false,
+    agendada_para: null,
+    criada_em: "2026-01-01T00:00:00.000Z",
+    iniciada_em: null,
+    concluida_em: null,
+    template_principal: null,
+    pausada_motivo: null,
+    rodada: 1,
+    total_contatos: 0,
+    total_enviadas: 0,
+    total_entregues: 0,
+    total_lidas: 0,
+    total_falhas: 0,
+    total_respostas: 0,
+    empresa_id: empresaId,
+  };
+}
+
 function bancoNovo(): Banco {
   return {
+    campanhas: [
+      campanha("campanha-a", EMPRESA_A, "campanha-da-a"),
+      campanha("campanha-b", EMPRESA_B, "campanha-da-b"),
+    ],
     canais: [canal("canal-a", EMPRESA_A, "canal-da-a"), canal("canal-b", EMPRESA_B, "canal-da-b")],
     perfis: [
       perfil("admin-a", EMPRESA_A, "admin"),
@@ -96,6 +133,7 @@ function bancoNovo(): Banco {
 type Operacao =
   | { tipo: "select"; colunas: string; contagem: boolean }
   | { tipo: "update"; valores: Registro }
+  | { tipo: "delete" }
   | { tipo: "insert"; valores: Registro }
   | { tipo: "upsert"; valores: Registro };
 
@@ -126,6 +164,11 @@ class ConsultaFalsa implements PromiseLike<{ data: unknown; error: null; count: 
 
   update(valores: Registro): this {
     this.operacao = { tipo: "update", valores };
+    return this;
+  }
+
+  delete(): this {
+    this.operacao = { tipo: "delete" };
     return this;
   }
 
@@ -192,6 +235,14 @@ class ConsultaFalsa implements PromiseLike<{ data: unknown; error: null; count: 
     }
     if (this.operacao.tipo === "update") {
       for (const linha of casadas) Object.assign(linha, this.operacao.valores);
+      return { data: casadas, count: casadas.length };
+    }
+    if (this.operacao.tipo === "delete") {
+      // Remove de verdade: é o que permite ao teste provar que a linha da OUTRA
+      // empresa continuou no banco depois de um delete que devia ter sido
+      // barrado. Contar as barradas não bastaria — um filtro que não casa nada
+      // e um delete que apaga tudo dão o mesmo `count`.
+      this.banco[this.tabela] = this.banco[this.tabela].filter((l) => !casadas.includes(l));
       return { data: casadas, count: casadas.length };
     }
     // insert e upsert: o suficiente para a auditoria não estourar.
@@ -481,5 +532,81 @@ describe("isolamento entre empresas — usuários", () => {
 
     const criado = banco.perfis.find((p) => p.email === "suporte@exemplo.com");
     expect(criado?.empresa_id).toBeNull();
+  });
+});
+
+/**
+ * Campanhas: o serviço com mais superfície de escopo do repositório — nove
+ * chamadas a `noEscopo` e sete a `empresaParaEscrita` — e o que estava de fora
+ * destes testes.
+ *
+ * O padrão aqui é diferente do de canais: `pausar`, `retomar`, `editar` e
+ * `excluir` não repetem o filtro de empresa nas escritas. Eles chamam `obter`
+ * primeiro, e é `obter` que carrega o `noEscopo`. Funciona, e é justamente o
+ * arranjo que o comentário no topo deste arquivo descreve: o que falha não é a
+ * função de escopo, é o caminho que se esquece de chamá-la. Um `pausar` que um
+ * dia deixe de começar por `obter` passa a pausar campanha de qualquer cliente
+ * — e nada na tela do dono muda.
+ *
+ * Por isso cada caminho de escrita é exercitado contra a campanha da OUTRA
+ * empresa, e não só o `obter`.
+ */
+describe("isolamento entre empresas — campanhas", () => {
+  let banco: Banco;
+  let campanhas: CampanhasService;
+
+  beforeEach(() => {
+    banco = bancoNovo();
+    campanhas = new CampanhasService(
+      supabaseFalso(banco),
+      auditoriaFalsa,
+      { exigirAcesso: async () => undefined } as unknown as CanaisService,
+      { publicar: async () => undefined } as unknown as FilaService,
+      limitesFalsos,
+    );
+  });
+
+  it("admin de uma empresa não lê campanha de outra", async () => {
+    await expect(campanhas.obter(ADMIN_A, "campanha-b")).rejects.toThrow(NotFoundException);
+  });
+
+  it("admin lê a campanha da própria empresa", async () => {
+    await expect(campanhas.obter(ADMIN_A, "campanha-a")).resolves.toMatchObject({
+      id: "campanha-a",
+    });
+  });
+
+  it("a conta global atravessa as empresas, que é o acesso de suporte", async () => {
+    await expect(campanhas.obter(GLOBAL, "campanha-a")).resolves.toMatchObject({
+      id: "campanha-a",
+    });
+    await expect(campanhas.obter(GLOBAL, "campanha-b")).resolves.toMatchObject({
+      id: "campanha-b",
+    });
+  });
+
+  it("operador não pausa campanha de outra empresa", async () => {
+    await expect(campanhas.pausar(OPERADOR_A, "campanha-b", "1.2.3.4")).rejects.toThrow(
+      NotFoundException,
+    );
+
+    // A campanha da outra empresa continua como estava: a recusa tem de vir
+    // ANTES da escrita, não depois de já ter mudado o status.
+    const alvo = banco.campanhas.find((c) => c.id === "campanha-b");
+    expect(alvo?.status).toBe("em_andamento");
+  });
+
+  it("admin não exclui campanha de outra empresa, e a linha sobrevive", async () => {
+    await expect(campanhas.excluir(ADMIN_A, "campanha-b", "1.2.3.4")).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(banco.campanhas.some((c) => c.id === "campanha-b")).toBe(true);
+  });
+
+  it("admin exclui a da própria empresa — a recusa acima é de escopo, não de papel", async () => {
+    // Sem este par, o teste anterior passaria mesmo se `excluir` estivesse
+    // quebrado para todo mundo.
+    await expect(campanhas.excluir(ADMIN_A, "campanha-a", "1.2.3.4")).resolves.toBe("campanha-a");
+    expect(banco.campanhas.some((c) => c.id === "campanha-a")).toBe(false);
   });
 });
