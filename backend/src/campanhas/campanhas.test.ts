@@ -212,7 +212,9 @@ function bancoNovo(): Banco {
   return {
     campanhas: [],
     campanha_canais: [],
-    canais: [{ id: CANAL_A, nome: "canal-a", status: "conectado", empresa_id: EMPRESA_A }],
+    canais: [
+      { id: CANAL_A, nome: "canal-a", status: "conectado", numero: "+5548999990000", empresa_id: EMPRESA_A },
+    ],
     empresas: [
       { id: EMPRESA_A, plano: PLANO_PADRAO },
       { id: EMPRESA_B, plano: PLANO_PADRAO },
@@ -253,6 +255,33 @@ describe("campanha criada com o worker fora do ar (cenário A)", () => {
     expect(banco.campanhas[0].empresa_id).toBe(EMPRESA_A);
     // Os canais também: sem o vínculo a campanha não teria por onde sair.
     expect(banco.campanha_canais).toHaveLength(1);
+  });
+
+  /*
+   * O canal que MENTE que está conectado.
+   *
+   * `status` é cache do webhook, e há um caminho que o deixa dizendo
+   * `conectado` sem número: o WhatsApp pareia com um número que já pertence a
+   * outro canal, e o número — que é o que o pareamento produz — não pode ser
+   * gravado nos dois. Sem número não há sessão utilizável.
+   *
+   * A checagem lia o campo cru e deixava passar. A campanha ia para
+   * `em_andamento` e o problema só aparecia contato a contato, DEPOIS do
+   * primeiro envio falhar: a conferência contra o gateway mora no caminho de
+   * atribuição de falha, que é reativo. O operador via a campanha "rodando"
+   * sem nada sair.
+   */
+  it("canal marcado como conectado, mas sem número, não deixa criar campanha", async () => {
+    banco.canais = [
+      { id: CANAL_A, nome: "canal-a", status: "conectado", numero: null, empresa_id: EMPRESA_A },
+    ];
+    const { servico } = montar(banco);
+
+    await expect(servico.criar(ADMIN_A, entrada(), "127.0.0.1")).rejects.toThrow(
+      /indisponível ou desconectado/,
+    );
+
+    expect(banco.campanhas).toHaveLength(0);
   });
 
   it("campanha agendada também sobrevive, com a hora preservada", async () => {

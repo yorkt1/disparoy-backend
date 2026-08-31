@@ -96,7 +96,11 @@ export function paraCanal(l: LinhaCanal): Canal {
   return {
     id: l.id,
     nome: l.nome,
-    numero: l.numero,
+    // `?? null` e não o valor cru: `apresentarCanal` compara com `=== null`
+    // para detectar "conectado sem número", e um `undefined` vindo de um
+    // SELECT que não pediu a coluna faria a contradição passar despercebida —
+    // silenciosamente, que é o pior jeito de essa checagem falhar.
+    numero: l.numero ?? null,
     instanciaEvolution: l.instancia_evolution,
     tipoConexao: l.tipo_conexao,
     status: l.status,

@@ -12,7 +12,13 @@ import type {
   SituacaoContato,
   StatusCampanha,
 } from "@disparoy/dominio";
-import { LIMITES, MAX_RESPOSTAS_NA_LISTA, percentual, slugify } from "@disparoy/dominio";
+import {
+  apresentarCanal,
+  LIMITES,
+  MAX_RESPOSTAS_NA_LISTA,
+  percentual,
+  slugify,
+} from "@disparoy/dominio";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AuditoriaService } from "../auditoria/auditoria.service";
 import { CanaisService } from "../canais/canais.service";
@@ -24,8 +30,11 @@ import {
   paraResumoCampanha,
   variaveis,
   COLUNAS_CONTATO_CAMPANHA,
+  COLUNAS_CANAL,
+  paraCanal,
   type LinhaCampanha,
   type LinhaContatoCampanha,
+  type LinhaCanal,
 } from "../comum/mapeadores";
 import {
   chavesDeVariaveis,
@@ -1086,15 +1095,31 @@ export class CampanhasService {
 
     const { data, error } = await this.supabase
       .tabela("canais")
-      .select("id, nome, status")
+      .select(COLUNAS_CANAL)
       .in("id", canaisIds);
 
     if (error) throw new Error(`Falha ao verificar canais: ${error.message}`);
 
-    const encontrados = (data ?? []) as { id: string; nome: string; status: string }[];
+    const encontrados = (data as unknown as LinhaCanal[] | null ?? []).map(paraCanal);
+
+    /*
+     * A prontidão sai de `apresentarCanal()`, e não de `canal.status` cru.
+     *
+     * `status` é cache do webhook e sabe mentir: um canal que pareou com um
+     * número já usado por outro fica gravado como `conectado` SEM número —
+     * estado impossível, porque o número é o que o pareamento produz. Lendo o
+     * campo cru, esse canal passava por aqui, a campanha ia para
+     * `em_andamento` e o worker só descobria o problema contato a contato,
+     * DEPOIS de o primeiro envio falhar: a verificação contra o gateway mora
+     * no caminho de atribuição de falha, que é reativo por natureza.
+     *
+     * É a mesma função que o painel usa para desenhar o selo. Duas leituras
+     * diferentes do mesmo estado é como a tela passou a dizer uma coisa e a
+     * API a aceitar outra.
+     */
     const problemas = canaisIds
       .map((id) => encontrados.find((c) => c.id === id))
-      .filter((c) => !c || c.status !== "conectado");
+      .filter((c) => !c || apresentarCanal(c).status !== "conectado");
 
     if (problemas.length > 0) {
       // Disparar por canal caído falha contato a contato — melhor barrar aqui.
