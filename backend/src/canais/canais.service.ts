@@ -173,6 +173,39 @@ export class CanaisService {
   }
 
   /**
+   * Mais estrito que `exigirAcesso`: exige ser DONO, não só ter acesso.
+   *
+   * Existe porque conectar o canal deixou de ser ato administrativo, e sem
+   * esta distinção "operador pode criar o próprio canal" viraria "operador
+   * pode excluir o canal do colega com quem ele compartilha um número".
+   * Excluir apaga a instância na Evolution, derruba a sessão do WhatsApp e
+   * desvincula campanhas — não tem desfazer, e quem paga o preço é quem
+   * conectou o aparelho.
+   *
+   * Admin da empresa passa: ele responde pela empresa inteira, e alguém
+   * precisa conseguir limpar o canal de quem saiu do time.
+   */
+  private async exigirDono(usuario: UsuarioAutenticado, canalId: string): Promise<void> {
+    await this.exigirAcesso(usuario, canalId);
+    if (usuario.papel === "admin") return;
+
+    const { data, error } = await this.supabase
+      .tabela("canal_membros")
+      .select("permissao")
+      .eq("canal_id", canalId)
+      .eq("perfil_id", usuario.id)
+      .maybeSingle();
+
+    // Mesmo padrão de `exigirAcesso`: erro de leitura recusa, não libera.
+    if (error) throw new Error(`Falha ao conferir o dono do canal: ${error.message}`);
+    if ((data as { permissao?: string } | null)?.permissao !== "owner") {
+      throw new ForbiddenException(
+        "Só quem conectou este canal pode excluí-lo. Peça ao dono ou a um administrador.",
+      );
+    }
+  }
+
+  /**
    * Cria o canal e abre a sessão na Evolution.
    *
    * Pede só o nome: o número chega pelo webhook quando alguém escaneia o QR.
@@ -715,6 +748,7 @@ export class CanaisService {
     forcar = false,
   ): Promise<void> {
     const canal = await this.obter(usuario, id);
+    await this.exigirDono(usuario, id);
     const campanhas = await this.vinculos(usuario, id);
 
     if (campanhas.length > 0 && !forcar) {

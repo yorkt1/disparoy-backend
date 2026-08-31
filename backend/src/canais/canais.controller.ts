@@ -34,9 +34,19 @@ export class CanaisController {
     return { canais: await this.canais.listar(usuario) };
   }
 
-  /** Conectar número é ato administrativo: mexe em custo e em risco de ban. */
+  /**
+   * Conectar número deixou de ser ato administrativo.
+   *
+   * Era `@SomenteAdmin()` porque conectar mexe em custo e em risco de ban. Na
+   * prática, isso deixou o operador podendo criar campanha e não podendo criar
+   * o canal por onde ela sai — ele dependia do admin para o passo 1 de tudo.
+   *
+   * O custo continua contido: `exigirEspacoParaCanal()` limita quantos canais
+   * cada empresa pode ter, pelo plano dela, e o teto vale igual para quem
+   * criou. E `criar` já vincula o autor como `owner`, então o canal aparece só
+   * para ele — o mesmo desenho das campanhas.
+   */
   @Post()
-  @SomenteAdmin()
   criar(
     @Usuario() usuario: UsuarioAutenticado,
     @Body(new ValidacaoZodPipe(canalEntradaSchema)) corpo: z.infer<typeof canalEntradaSchema>,
@@ -134,8 +144,16 @@ export class CanaisController {
     return { campanhas: await this.canais.vinculos(usuario, id) };
   }
 
+  /**
+   * Excluir o canal. Quem pode é conferido no serviço, não aqui.
+   *
+   * Deixou de ser `@SomenteAdmin()` junto com a criação — quem conectou o
+   * próprio número precisa poder desconectá-lo. Mas não virou livre: o serviço
+   * exige ser DONO do canal (ou admin da empresa). Excluir apaga a instância
+   * na Evolution e não tem desfazer, então "tenho acesso" não basta; tem que
+   * ser de quem o canal é.
+   */
   @Delete(":id")
-  @SomenteAdmin()
   @HttpCode(200)
   async excluir(
     @Usuario() usuario: UsuarioAutenticado,
