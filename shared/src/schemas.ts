@@ -173,7 +173,33 @@ export const campanhaEdicaoSchema = z.object({
   intervaloEntreMensagens: intervaloSchema.optional(),
   validarNumeros: z.boolean().optional(),
   agendadaPara: z.string().datetime({ offset: true }).nullable().optional(),
-});
+})
+  /*
+   * A mesma recusa de data passada que a criação já fazia.
+   *
+   * A criação validava e a edição não, e a diferença produzia campanha
+   * agendada para um horário que já foi: ela não dispara, fica "agendada" na
+   * tela como se fosse sair, e só meia hora depois a manutenção a expira. Meia
+   * hora em que o operador acha que a campanha está a caminho.
+   *
+   * `undefined` passa direto, e é o caso comum: campo omitido significa
+   * "não mexa no agendamento", e a tela de edição não o envia justamente por
+   * não ter controle de data. `null` também passa — é o pedido explícito de
+   * desagendar.
+   *
+   * O minuto de folga é o mesmo da criação: sem ele, agendar "para agora"
+   * seria recusado pelo tempo da própria requisição.
+   */
+  .superRefine((v, ctx) => {
+    if (!v.agendadaPara) return;
+    if (new Date(v.agendadaPara).getTime() < Date.now() - 60_000) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["agendadaPara"],
+        message: "A data de agendamento já passou.",
+      });
+    }
+  });
 
 export type CampanhaEdicao = z.infer<typeof campanhaEdicaoSchema>;
 
