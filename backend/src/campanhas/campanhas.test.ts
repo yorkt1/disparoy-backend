@@ -284,6 +284,31 @@ describe("campanha criada com o worker fora do ar (cenário A)", () => {
     expect(banco.campanhas).toHaveLength(0);
   });
 
+  /*
+   * Campanha `falhou` volta a disparar.
+   *
+   * `falhou` numa CAMPANHA só vem de três caminhos, e nos três nada saiu: o
+   * agendamento venceu sem o disparo começar (duas rotinas de manutenção) ou
+   * não havia canal conectado na hora. Os contatos continuam pendentes.
+   *
+   * Sem isto ela ficava sem caminho de volta — não podia ser pausada nem
+   * retomada, e o único jeito de mandá-la era duplicar. Quem agendou para as
+   * 9:11 e perdeu a hora perdia a campanha por trinta minutos de atraso.
+   */
+  it("campanha que não chegou a disparar pode ser retomada", async () => {
+    const { servico } = montar(banco);
+    banco.campanhas.push({
+      ...campanha("camp-falhou", EMPRESA_A, "expirada"),
+      status: "falhou",
+      agendada_para: "2026-01-01T00:00:00.000Z",
+    });
+    banco.campanha_canais.push({ campanha_id: "camp-falhou", canal_id: CANAL_A });
+
+    await servico.retomar(ADMIN_A, "camp-falhou", "127.0.0.1");
+
+    expect(banco.campanhas.find((c) => c.id === "camp-falhou")?.status).toBe("em_andamento");
+  });
+
   it("campanha agendada também sobrevive, com a hora preservada", async () => {
     const quandoUmMesDepois = new Date(Date.now() + 30 * 86_400_000).toISOString();
     const { servico } = montar(banco, {

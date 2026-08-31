@@ -1004,9 +1004,28 @@ export class CampanhasService {
      * o QR e não teria botão nenhum para seguir. O `exigirCanaisProntos` abaixo
      * é o que impede retomar antes de o canal voltar de verdade.
      */
-    const retomaveis = ["pausada", "pausada_por_canal", "rascunho"];
+    /*
+     * `falhou` entra aqui, e não é afrouxamento.
+     *
+     * Campanha inteira só vira `falhou` por três caminhos, e os três são
+     * recuperáveis: o agendamento venceu sem o disparo começar (duas rotinas
+     * de manutenção) ou não havia canal conectado na hora. Nos três NADA foi
+     * enviado — os contatos continuam pendentes.
+     *
+     * Sem isto ela ficava sem caminho de volta: não podia ser pausada, não
+     * podia ser retomada, e o único jeito de mandá-la era duplicar, que não se
+     * lê como recuperação. O operador que agendou para as 9:11 e perdeu a hora
+     * perdia a campanha inteira por trinta minutos de atraso.
+     *
+     * O `exigirCanaisProntos` logo abaixo é o que impede isto de virar
+     * "retomar com o canal ainda caído" — a mesma trava que protege
+     * `pausada_por_canal`.
+     */
+    const retomaveis = ["pausada", "pausada_por_canal", "rascunho", "falhou"];
     if (!retomaveis.includes(campanha.status)) {
-      throw new ConflictException("Só é possível retomar campanha pausada ou em rascunho.");
+      throw new ConflictException(
+        "Só é possível retomar campanha pausada, em rascunho ou que não chegou a disparar.",
+      );
     }
     await this.exigirCanaisProntos(usuario, campanha.canaisIds);
 
