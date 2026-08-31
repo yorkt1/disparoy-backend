@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { conteudoDaMensagem, horaDoEvento } from "./evolution.service";
+import { conteudoDaMensagem, detalheNumeroDuplicado, horaDoEvento } from "./evolution.service";
 
 /**
  * O que conta como resposta do contato, e o que fica de fora.
@@ -90,5 +90,43 @@ describe("horaDoEvento", () => {
   it("timestamp inválido não vira data em 1970", () => {
     expect(new Date(horaDoEvento(0)).getFullYear()).toBeGreaterThan(2000);
     expect(new Date(horaDoEvento("abc")).getFullYear()).toBeGreaterThan(2000);
+  });
+});
+
+/**
+ * Número que já pertence a outro canal.
+ *
+ * O WhatsApp pareia normalmente — a Evolution manda `state: open` — e o INSERT
+ * do número bate no índice único de `canais.numero`. Antes, este caminho
+ * gravava `conectado` e jogava o número fora: o canal ficava conectado sem
+ * número, estado impossível, e a tela dizia "o pareamento nunca foi concluído",
+ * que é falso. O operador relia o QR atrás de um erro que não estava nele.
+ *
+ * O texto abaixo é o que passou a explicar o que houve. A regra que estes
+ * testes seguram é a de quem pode ser nomeado.
+ */
+describe("detalheNumeroDuplicado", () => {
+  it("nomeia o outro canal quando ele é da mesma empresa", () => {
+    // Dentro da própria empresa o nome é a informação que resolve: sem ele o
+    // operador não sabe onde ir desconectar.
+    const texto = detalheNumeroDuplicado("Comercial");
+    expect(texto).toContain('"Comercial"');
+    expect(texto).toMatch(/desconecte/i);
+  });
+
+  it("não revela nada quando o canal é de outra empresa", () => {
+    // O nome de um canal alheio é dado de cliente. Revelá-lo transformaria
+    // esta mensagem num oráculo: tenta parear com um número e descobre se a
+    // concorrência o opera, e com que nome.
+    const texto = detalheNumeroDuplicado(null);
+    expect(texto).not.toMatch(/"/);
+    expect(texto).toMatch(/outro canal do sistema/i);
+  });
+
+  it("os dois textos dizem o que fazer, não só o que houve", () => {
+    // Um aviso que descreve o problema e não aponta a saída devolve o operador
+    // ao mesmo lugar: relendo o QR.
+    expect(detalheNumeroDuplicado("Vendas")).toMatch(/exclua o outro canal/i);
+    expect(detalheNumeroDuplicado(null)).toMatch(/número diferente|administrador/i);
   });
 });

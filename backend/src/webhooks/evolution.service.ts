@@ -254,23 +254,94 @@ export class EvolutionService {
 
     const { error } = await this.supabase.tabela("canais").update(atualizacao).eq("id", canal.id);
 
-    // 23505: outro canal já usa esse número. O pareamento é real, então o
-    // status vale; só o número não pode ser gravado em dois canais.
+    /*
+     * 23505: o número que acabou de parear já pertence a outro canal.
+     *
+     * Antes, este caminho gravava `conectado` e jogava o número fora, com um
+     * aviso que só existia no log do servidor. O canal ficava `conectado` sem
+     * número — estado impossível — e a tela dizia "marcado como conectado, mas
+     * o pareamento nunca foi concluído", que é FALSO: o pareamento concluiu,
+     * o que não dá é ter o mesmo WhatsApp em dois canais. O operador relia o
+     * QR a noite inteira atrás de um erro que não estava nele.
+     *
+     * Agora o estado gravado é o verdadeiro — sem número o canal não envia
+     * nada, então ele não está conectado para efeito nenhum — e o motivo vira
+     * incidente, que é a via pela qual o resto do sistema conta a um humano o
+     * que ele precisa resolver.
+     */
+    let statusFinal = status;
     if (error?.code === "23505") {
-      delete atualizacao.numero;
-      await this.supabase.tabela("canais").update(atualizacao).eq("id", canal.id);
-      this.logger.warn(
-        `Canal ${instancia} pareou com um número já usado por outro canal.`,
-      );
+      statusFinal = "aguardando_qr";
+      await this.registrarNumeroDuplicado(canal, instancia, String(atualizacao.numero ?? ""));
     } else if (error) {
       throw new Error(`Falha ao atualizar o canal: ${error.message}`);
     }
 
     this.logger.log(
-      `Canal ${instancia}: ${status}${atualizacao.numero ? ` (${String(atualizacao.numero)})` : ""}`,
+      `Canal ${instancia}: ${statusFinal}${atualizacao.numero && statusFinal === status ? ` (${String(atualizacao.numero)})` : ""}`,
     );
 
-    await this.reagirAConexao(canal.id, instancia, status);
+    await this.reagirAConexao(canal.id, instancia, statusFinal);
+  }
+
+  /**
+   * Grava o estado honesto e conta ao operador que o número já tem dono.
+   *
+   * Duas coisas que este método NÃO faz, e por quê:
+   *
+   * Não desconecta o outro canal. Tomar um número de outro canal derruba a
+   * sessão de WhatsApp de alguém e, se houver campanha rodando por ele, para o
+   * disparo no meio — não é efeito colateral de escanear um QR, é decisão de
+   * um humano com a informação na frente.
+   *
+   * Não diz DE QUEM é o outro canal quando ele é de outra empresa. O nome de
+   * um canal alheio é dado de cliente: revelá-lo transformaria esta mensagem
+   * num jeito de descobrir quais números a concorrência opera, bastando tentar
+   * parear. Dentro da mesma empresa o nome vai, porque ali é a informação que
+   * resolve o problema.
+   */
+  private async registrarNumeroDuplicado(
+    canal: { id: string; empresa_id: string | null },
+    instancia: string,
+    numero: string,
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .tabela("canais")
+      .update({ status: "aguardando_qr" })
+      .eq("id", canal.id);
+
+    if (error) throw new Error(`Falha ao atualizar o canal: ${error.message}`);
+
+    const { data } = await this.supabase
+      .tabela("canais")
+      .select("nome, empresa_id")
+      .eq("numero", numero)
+      .maybeSingle();
+
+    const dono = data as { nome: string; empresa_id: string | null } | null;
+    const detalhe = detalheNumeroDuplicado(
+      dono !== null && dono.empresa_id === canal.empresa_id ? dono.nome : null,
+    );
+
+    // `abrir_incidente` é idempotente por (categoria, código, canal): reler o
+    // QR dez vezes soma ocorrências no mesmo incidente em vez de abrir dez.
+    const { error: erroIncidente } = await this.supabase.db.rpc("abrir_incidente", {
+      p_categoria: "configuracao",
+      p_codigo: "numero_ja_usado",
+      p_titulo: "Número já conectado em outro canal",
+      p_canal_id: canal.id,
+      p_detalhe: detalhe,
+    });
+
+    if (erroIncidente) {
+      // Não relança: o estado do canal já foi corrigido, que é a parte que não
+      // pode falhar. Perder o incidente custa a explicação, não o dado.
+      this.logger.error(
+        `Falha ao abrir o incidente de número duplicado (${instancia}): ${erroIncidente.message}`,
+      );
+    }
+
+    this.logger.warn(`Canal ${instancia} pareou com um número já usado por outro canal.`);
   }
 
   /**
@@ -618,4 +689,29 @@ function jidParaTelefone(jid: string): string | null {
   if (!digitos) return null;
   const r = normalizarTelefone(`+${digitos}`);
   return r.valido ? r.e164 : null;
+}
+
+/**
+ * O texto que o operador lê quando o número já tem dono.
+ *
+ * Recebe o nome do outro canal APENAS quando ele é da mesma empresa; de outra
+ * empresa recebe `null`. A decisão de esconder mora em quem chama, e o texto
+ * mora aqui, separado, porque é a regra que não pode ser afrouxada por
+ * descuido: o nome de um canal alheio é dado de cliente, e revelá-lo faria
+ * desta mensagem um jeito de descobrir quais números a concorrência opera —
+ * bastaria tentar parear com um número e ler o aviso.
+ */
+export function detalheNumeroDuplicado(nomeDoOutroCanal: string | null): string {
+  if (nomeDoOutroCanal === null) {
+    return (
+      "Este WhatsApp já está conectado em outro canal do sistema. " +
+      "Use um número diferente, ou fale com o administrador."
+    );
+  }
+
+  return (
+    `Este WhatsApp já está no canal "${nomeDoOutroCanal}". Um número só pode ` +
+    "estar em um canal por vez: desconecte-o no aparelho ou exclua o outro " +
+    "canal antes de conectar por aqui."
+  );
 }

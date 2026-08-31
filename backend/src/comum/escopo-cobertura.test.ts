@@ -71,7 +71,22 @@ const ORCAMENTO: Record<string, number> = {
   // escopo no caminho.
   "worker/manutencao.service.ts": 2,
   "worker/execucao.ts": 1,
-  "webhooks/evolution.service.ts": 3,
+  /*
+   * 3 → 4: `registrarNumeroDuplicado` procura de quem é o número que acabou de
+   * parear, para poder dizer ao operador onde ele já está.
+   *
+   * Sem escopo porque não há usuário nenhum nesta camada: o webhook é uma
+   * chamada da Evolution, autenticada por segredo compartilhado, e o "quem"
+   * que chega é uma instância — não um login. Escopar por empresa aqui é
+   * impossível, e seria errado: a busca precisa alcançar TODAS as empresas,
+   * senão o número duplicado em outra passa despercebido e o canal volta ao
+   * estado impossível que esta mudança existe para eliminar.
+   *
+   * O que protege o cliente não é o filtro, é `detalheNumeroDuplicado`: quem
+   * decide se o nome do outro canal pode ser dito compara as empresas antes, e
+   * há teste para os dois lados em `mensagem-recebida.test.ts`.
+   */
+  "webhooks/evolution.service.ts": 4,
 
   /*
    * BOOT e SAÚDE: rodam antes de existir requisição.
