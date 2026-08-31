@@ -39,6 +39,7 @@ interface Banco {
   canais: Registro[];
   perfis: Registro[];
   canal_membros: Registro[];
+  campanha_canais: Registro[];
   logs_auditoria: Registro[];
 }
 
@@ -126,6 +127,7 @@ function bancoNovo(): Banco {
       { canal_id: "canal-a", perfil_id: "operador-a", permissao: "operator" },
       { canal_id: "canal-b", perfil_id: "admin-b", permissao: "owner" },
     ],
+    campanha_canais: [],
     logs_auditoria: [],
   };
 }
@@ -354,6 +356,41 @@ describe("isolamento entre empresas — canais", () => {
     });
     const lista = await canais.listar(OPERADOR_A);
     expect(lista.map((c) => c.id)).toEqual(["canal-a"]);
+  });
+
+  /*
+   * Excluir canal deixou de ser `@SomenteAdmin()` — operador conecta o próprio
+   * número e precisa poder desconectá-lo. O que substituiu o guard é
+   * `exigirDono`, e é ele que estes dois cobrem: sem essa trava, "operador cria
+   * o próprio canal" viraria "operador exclui o canal do colega com quem ele
+   * compartilha um número", e excluir apaga a instância na Evolution sem volta.
+   */
+  it("operador com acesso, mas sem ser dono, não exclui o canal", async () => {
+    // `operador-a` é membro de `canal-a` com permissão "operator", não "owner".
+    await expect(canais.excluir(OPERADOR_A, "canal-a", "127.0.0.1")).rejects.toThrow(
+      /Só quem conectou/,
+    );
+
+    expect(banco.canais.some((c) => c.id === "canal-a")).toBe(true);
+  });
+
+  it("o dono passa pela trava e o canal sai da tabela", async () => {
+    // O vínculo de "operator" é trocado por "owner": o dublê não tem
+    // `maybeSingle` com ordenação, e dois vínculos para o mesmo par tornariam o
+    // resultado dependente da ordem de inserção.
+    banco.canal_membros = banco.canal_membros.filter((m) => m.perfil_id !== "operador-a");
+    banco.canal_membros.push({ canal_id: "canal-a", perfil_id: "operador-a", permissao: "owner" });
+
+    /*
+     * A exclusão continua depois desta camada — chama a Evolution e limpa o
+     * cache de agenda —, e nada disso está dublado aqui. O que este teste
+     * afere é o que mudou: a trava de dono deixou o operador passar, e o
+     * DELETE em `canais` chegou a acontecer.
+     */
+    const erro = await canais.excluir(OPERADOR_A, "canal-a", "127.0.0.1").catch((e: unknown) => e);
+
+    expect(String(erro)).not.toMatch(/Só quem conectou/);
+    expect(banco.canais.some((c) => c.id === "canal-a")).toBe(false);
   });
 
   it("a listagem do admin traz só os canais da empresa dele", async () => {
