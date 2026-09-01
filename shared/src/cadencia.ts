@@ -3,22 +3,51 @@ import type { IntervaloAleatorio } from "./tipos.js";
 /**
  * Quanto esperar entre um contato e o próximo, pelo tamanho da leva.
  *
- * O padrão de hoje é `90–240 s` fixo para todo mundo
- * (`INTERVALO_PADRAO_ENTRE_CONTATOS`), e é fixo demais nos dois sentidos: uma
- * leva de 40 pessoas é tratada com a mesma desconfiança de uma de 3 mil, e uma
- * de 3 mil pode sortear 90 s tantas vezes seguidas quanto o acaso quiser.
+ * O padrão anterior era `90–240 s` fixo para toda campanha, e era fixo demais
+ * nos dois sentidos: uma leva de 8 pessoas esperava tanto quanto uma de 3 mil,
+ * e a de 3 mil podia sortear 90 s tantas vezes seguidas quanto o acaso
+ * quisesse.
  *
- * O que queima um número é VOLUME por dia, não o disparo em si. Então a faixa
- * desliza com o tamanho da leva: pouca gente anda perto do piso, muita gente
- * anda perto do teto.
+ * O que queima um número é VOLUME por dia, não o disparo em si — e volume
+ * baixo não precisa de intervalo alto. Ninguém toma bloqueio mandando oito
+ * mensagens. Por isso a faixa desliza com o tamanho da leva, de 10–30 s numa
+ * lista mínima até 210–240 s numa de milhares.
  *
- * Os extremos são os que o operador pediu e não se movem — 90 s de piso
- * absoluto, 240 s de teto absoluto.
+ * Nada aqui é obrigatório: são os números que a tela sugere e preenche, com os
+ * campos seguindo editáveis.
  */
 
 /** Piso e teto absolutos da cadência entre contatos, em segundos. */
-export const CADENCIA_MINIMA_SEGUNDOS = 90;
+export const CADENCIA_MINIMA_SEGUNDOS = 10;
 export const CADENCIA_MAXIMA_SEGUNDOS = 240;
+
+/**
+ * A curva, em pontos de apoio — e não numa fórmula só.
+ *
+ * A primeira versão ia de 90 a 240 em linha reta, e o operador apontou o erro:
+ * uma leva de menos de dez pessoas a 90 s por contato é espera pura, e não
+ * protege de nada. Ninguém toma bloqueio mandando oito mensagens. O risco é
+ * função do VOLUME, e volume baixo não precisa de intervalo alto.
+ *
+ * Pontos escolhidos, e não interpolação de ponta a ponta, porque a relação não
+ * é reta: entre 10 e 200 contatos ela sobe rápido (é onde o disparo deixa de
+ * parecer conversa e passa a parecer campanha), e daí para cima sobe devagar
+ * até saturar.
+ *
+ * Teste manual é o caso do primeiro ponto e ele foi levado em conta: com dois
+ * ou três contatos, 10 a 30 s deixa conferir se a mensagem saiu certa sem
+ * esperar cinco minutos.
+ *
+ * TUDO AQUI É SUGESTÃO. A tela mantém os dois campos editáveis o tempo todo —
+ * ver `ControleIntervalo`. Estes números decidem o que aparece preenchido, não
+ * o que o operador pode fazer.
+ */
+const ANCORAS: { contatos: number; faixa: IntervaloAleatorio }[] = [
+  { contatos: 10, faixa: { minSegundos: 10, maxSegundos: 30 } },
+  { contatos: 50, faixa: { minSegundos: 45, maxSegundos: 75 } },
+  { contatos: 200, faixa: { minSegundos: 90, maxSegundos: 120 } },
+  { contatos: 1500, faixa: { minSegundos: 210, maxSegundos: 240 } },
+];
 
 /**
  * A partir de quantos contatos a leva já anda no teto.
@@ -27,17 +56,7 @@ export const CADENCIA_MAXIMA_SEGUNDOS = 240;
  * intervalo não tem mais como crescer, e o que protege o número passa a ser
  * dividir a campanha em mais dias, não esperar mais entre um envio e outro.
  */
-export const CONTATOS_PARA_CADENCIA_MAXIMA = 1500;
-
-/**
- * Largura da faixa sorteável, em segundos.
- *
- * A faixa existe para o envio não ter período constante — intervalo fixo é
- * assinatura de robô. 30 s sobre um piso de 90 já é 33% de variação, que basta
- * para não haver período; mais do que isso só tornaria a duração da campanha
- * imprevisível para quem precisa planejar o dia.
- */
-const LARGURA_FAIXA_SEGUNDOS = 30;
+export const CONTATOS_PARA_CADENCIA_MAXIMA = ANCORAS[ANCORAS.length - 1].contatos;
 
 /**
  * Quanto tempo se considera que um dia de disparo comporta.
@@ -65,14 +84,32 @@ function limitar(valor: number, minimo: number, maximo: number): number {
  * decide o risco.
  */
 export function intervaloSugerido(contatos: number): IntervaloAleatorio {
-  const fracao = limitar(contatos / CONTATOS_PARA_CADENCIA_MAXIMA, 0, 1);
-  const teto = CADENCIA_MAXIMA_SEGUNDOS - LARGURA_FAIXA_SEGUNDOS;
+  const primeira = ANCORAS[0];
+  const ultima = ANCORAS[ANCORAS.length - 1];
 
-  const minSegundos = Math.round(
-    CADENCIA_MINIMA_SEGUNDOS + (teto - CADENCIA_MINIMA_SEGUNDOS) * fracao,
-  );
+  // Abaixo do primeiro ponto e acima do último a curva é plana: leva minúscula
+  // não fica mais rápida que o piso, e leva gigante não passa do teto.
+  if (contatos <= primeira.contatos) return { ...primeira.faixa };
+  if (contatos >= ultima.contatos) return { ...ultima.faixa };
 
-  return { minSegundos, maxSegundos: minSegundos + LARGURA_FAIXA_SEGUNDOS };
+  for (let i = 1; i < ANCORAS.length; i += 1) {
+    const fim = ANCORAS[i];
+    if (contatos > fim.contatos) continue;
+
+    const inicio = ANCORAS[i - 1];
+    const fracao = (contatos - inicio.contatos) / (fim.contatos - inicio.contatos);
+    return {
+      minSegundos: entre(inicio.faixa.minSegundos, fim.faixa.minSegundos, fracao),
+      maxSegundos: entre(inicio.faixa.maxSegundos, fim.faixa.maxSegundos, fracao),
+    };
+  }
+
+  return { ...ultima.faixa };
+}
+
+/** Interpolação linear entre dois segundos inteiros. */
+function entre(de: number, ate: number, fracao: number): number {
+  return Math.round(de + (ate - de) * limitar(fracao, 0, 1));
 }
 
 /**

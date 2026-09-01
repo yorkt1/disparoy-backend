@@ -52,11 +52,14 @@ export class CampanhasController {
 
   @Get(":id")
   async obter(@Usuario() usuario: UsuarioAutenticado, @Param("id", ParseUUIDPipe) id: string) {
-    const [campanha, contatos] = await Promise.all([
+    const [campanha, contatos, ultimosEnvios] = await Promise.all([
       this.campanhas.obter(usuario, id),
       this.campanhas.amostraDeContatos(usuario, id),
+      // O ritmo real do disparo, para a tela conferir o intervalo configurado
+      // contra o que de fato aconteceu.
+      this.campanhas.ultimosEnvios(usuario, id),
     ]);
-    return { campanha, contatos };
+    return { campanha, contatos, ultimosEnvios };
   }
 
   /**

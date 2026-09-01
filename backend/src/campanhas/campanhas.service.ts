@@ -160,6 +160,54 @@ export class CampanhasService {
     return paraCampanha(data as unknown as LinhaCampanha);
   }
 
+  /**
+   * As últimas mensagens que saíram, só o horário — o ritmo real do disparo.
+   *
+   * Existe para uma pergunta que a tela não sabia responder: "o intervalo está
+   * mesmo sendo respeitado?". A faixa configurada diz o que DEVERIA acontecer;
+   * isto diz o que aconteceu. Num teste de campanha nova é a diferença entre
+   * confiar na configuração e ver o espaçamento com os próprios olhos.
+   *
+   * Só os horários, e poucos: o corpo das mensagens é dado pessoal e não tem o
+   * que fazer num contador de cadência. Oito é o bastante para mostrar sete
+   * intervalos, que já revela se o sorteio está dentro da faixa ou preso num
+   * valor só.
+   *
+   * `enviada_em` e não `entregue_em`: o que se mede aqui é o ritmo do NOSSO
+   * disparo. A entrega depende do WhatsApp e do aparelho do destinatário, e
+   * misturar as duas coisas faria um celular desligado parecer intervalo mal
+   * configurado.
+   */
+  async ultimosEnvios(usuario: UsuarioAutenticado, id: string, limite = 8): Promise<string[]> {
+    // O escopo vem daqui: `mensagens_enviadas` não tem `empresa_id`, e nem
+    // deve — o dono é a campanha, e `obter` lança para campanha de outra.
+    await this.obter(usuario, id);
+
+    const { data, error } = await this.supabase
+      .tabela("mensagens_enviadas")
+      .select("enviada_em")
+      .eq("campanha_id", id)
+      .not("enviada_em", "is", null)
+      .order("enviada_em", { ascending: false })
+      .limit(limite);
+
+    /*
+     * Aviso, e não exceção: isto é um extra de acompanhamento.
+     *
+     * Derrubar a tela inteira da campanha porque o contador de ritmo não
+     * carregou deixaria o operador sem ver métrica, sequência nem contatos —
+     * muito pior do que ficar sem o contador.
+     */
+    if (error) {
+      this.logger.warn(`Não foi possível ler o ritmo do disparo: ${error.message}`);
+      return [];
+    }
+
+    return ((data ?? []) as unknown as { enviada_em: string | null }[])
+      .map((l) => l.enviada_em)
+      .filter((d): d is string => d !== null);
+  }
+
   /** Amostra de contatos: a tela de detalhes mostra os primeiros, não os 20 mil. */
   async amostraDeContatos(
     usuario: UsuarioAutenticado,

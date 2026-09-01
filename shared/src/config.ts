@@ -95,7 +95,16 @@ export function tipoDaExtensao(extensao: string): keyof typeof MIDIA_ACEITA | nu
   return null;
 }
 
-export const INTERVALO_PADRAO_ENTRE_CONTATOS = { minSegundos: 90, maxSegundos: 240 };
+/*
+ * Não existe mais um padrão FIXO de intervalo entre contatos.
+ *
+ * Era `{ 90, 240 }` aqui, igual para toda campanha, e o número perdeu o
+ * sentido: quem sugere a faixa agora é `intervaloSugerido` em `cadencia.ts`,
+ * pelo tamanho da leva — de 10–30 s numa lista de teste até 210–240 s numa de
+ * milhares. Deixar a constante viva seria manter um segundo lugar dizendo qual
+ * é o intervalo certo, e o dia em que os dois discordassem ninguém saberia
+ * qual estava valendo.
+ */
 export const INTERVALO_PADRAO_ENTRE_MENSAGENS = { minSegundos: 3, maxSegundos: 9 };
 
 /**

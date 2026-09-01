@@ -45,7 +45,20 @@ describe("intervaloSugerido", () => {
   it("começa no piso quando não há ninguém na leva", () => {
     // Zero contatos acontece na tela: o formulário calcula antes de a planilha
     // ser carregada. Não pode dar NaN nem número negativo.
-    expect(intervaloSugerido(0)).toEqual({ minSegundos: 90, maxSegundos: 120 });
+    expect(intervaloSugerido(0)).toEqual({ minSegundos: 10, maxSegundos: 30 });
+  });
+
+  it("leva minúscula não espera como campanha grande", () => {
+    // O caso que corrigiu a primeira versão da curva: oito contatos a 90 s por
+    // contato é espera pura e não protege de nada — ninguém toma bloqueio
+    // mandando oito mensagens. É também o caso do teste manual.
+    for (const n of [1, 3, 8, 10]) {
+      expect(intervaloSugerido(n)).toEqual({ minSegundos: 10, maxSegundos: 30 });
+    }
+  });
+
+  it("uma leva de campanha de verdade volta para a casa dos 90 s", () => {
+    expect(intervaloSugerido(200)).toEqual({ minSegundos: 90, maxSegundos: 120 });
   });
 
   it("satura no teto e não passa dele", () => {
@@ -55,9 +68,12 @@ describe("intervaloSugerido", () => {
     expect(intervaloSugerido(50_000)).toEqual(noPonto);
   });
 
-  it("uma leva pequena anda perto do piso e uma grande perto do teto", () => {
-    expect(intervaloSugerido(100).minSegundos).toBeLessThan(110);
-    expect(intervaloSugerido(1200).minSegundos).toBeGreaterThan(180);
+  it("sobe rápido entre 10 e 200, e devagar depois", () => {
+    // A relação não é reta: é entre essas duas pontas que o disparo deixa de
+    // parecer conversa e passa a parecer campanha.
+    const saltoInicial = intervaloSugerido(200).minSegundos - intervaloSugerido(10).minSegundos;
+    const saltoFinal = intervaloSugerido(1500).minSegundos - intervaloSugerido(200).minSegundos;
+    expect(saltoInicial / 190).toBeGreaterThan(saltoFinal / 1300);
   });
 });
 
@@ -71,8 +87,8 @@ describe("duração e janela do dia", () => {
   });
 
   it("aponta a leva que não fecha no dia", () => {
-    // ~340 contatos a 105 s médios enchem as 10 h; 1200 passam MUITO disso, e
-    // é esse o caso que o aviso da tela precisa pegar antes do disparo.
+    // Uma leva pequena fecha em minutos; 1200 contatos passam MUITO das 10 h,
+    // e é esse o caso que o aviso da tela precisa pegar antes do disparo.
     expect(fechaNoDia(100, intervaloSugerido(100))).toBe(true);
     expect(fechaNoDia(1200, intervaloSugerido(1200))).toBe(false);
   });
