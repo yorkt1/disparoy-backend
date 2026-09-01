@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Canal, MensagemSequencia } from "@disparoy/dominio";
+import type { Canal, MensagemSequencia, Spintax } from "@disparoy/dominio";
 import { WhatsappService } from "./whatsapp.service";
 
 /**
@@ -115,5 +115,81 @@ describe("retomada da sequência", () => {
     expect(resultados).toHaveLength(1);
     expect(resultados[0].resultado.ok).toBe(false);
     expect(enviados).toEqual([]);
+  });
+});
+
+/**
+ * O sorteio da variação, no lugar em que ele acontece de verdade.
+ *
+ * Faltava: todos os casos acima passam `variacoes: []`, então nada aqui
+ * exercitava `renderizarMensagem` com uma lista real. O domínio tem teste
+ * próprio, mas o domínio não é o que dispara — se `dispararSequencia` sorteasse
+ * uma vez e reaproveitasse, ou passasse o corpo cru ao provedor, a suíte
+ * inteira continuaria verde e todo contato receberia o mesmo texto.
+ *
+ * É exatamente a suspeita que motivou estes testes, e o que eles respondem:
+ * o sorteio é POR ENVIO, não por campanha.
+ */
+describe("variações no envio", () => {
+  const OPCOES = ["Oi", "Olá", "E aí"];
+
+  const variacoes = [
+    { id: "s1", nome: "saudacao", opcoes: OPCOES, criadoEm: "" },
+  ] as unknown as Spintax[];
+
+  const umPasso = [
+    { id: "m1", tipo: "texto", corpo: "{{*saudacao*}} {{1}}" },
+  ] as unknown as MensagemSequencia[];
+
+  beforeEach(() => {
+    enviados.length = 0;
+  });
+
+  it("resolve {{*nome*}} e {{1}} antes de entregar ao provedor", async () => {
+    const servico = new WhatsappService();
+    await servico.dispararSequencia({
+      canal,
+      destinatario: { telefone: "+5511999999999", variaveis: { "1": "Ana" } },
+      sequencia: umPasso,
+      variacoes,
+    });
+
+    expect(enviados).toHaveLength(1);
+    // O marcador não pode sobrar no que sai: o contato leria "{{*saudacao*}}".
+    expect(enviados[0]).not.toContain("{{");
+    expect(OPCOES.map((o) => `${o} Ana`)).toContain(enviados[0]);
+  });
+
+  it("sorteia por envio: contatos diferentes não recebem todos o mesmo texto", async () => {
+    const servico = new WhatsappService();
+
+    // Trinta envios independentes, como o worker faz — um `dispararSequencia`
+    // por contato. Com três opções, sair tudo igual tem chance de 3*(1/3)^30:
+    // se este teste falhar, é bug, não azar.
+    for (let i = 0; i < 30; i += 1) {
+      await servico.dispararSequencia({
+        canal,
+        destinatario: { telefone: `+551199999${String(i).padStart(4, "0")}`, variaveis: {} },
+        sequencia: umPasso,
+        variacoes,
+      });
+    }
+
+    expect(enviados).toHaveLength(30);
+    expect(new Set(enviados).size).toBeGreaterThan(1);
+  });
+
+  it("mantém a referência literal quando a variação não foi carregada", async () => {
+    // O worker devolve [] quando a campanha não tem empresa. O texto sai com o
+    // marcador visível de propósito — melhor do que sair com o de outra empresa.
+    const servico = new WhatsappService();
+    await servico.dispararSequencia({
+      canal,
+      destinatario: { telefone: "+5511999999999", variaveis: {} },
+      sequencia: umPasso,
+      variacoes: [],
+    });
+
+    expect(enviados[0]).toBe("{{*saudacao*}} {{1}}");
   });
 });

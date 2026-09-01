@@ -360,8 +360,20 @@ export interface RespostaRecebida {
   recebidaEm: string;
 }
 
-/** Quantas respostas por contato a lista da campanha carrega. */
-export const MAX_RESPOSTAS_NA_LISTA = 3;
+/**
+ * Quantas respostas por contato a lista da campanha carrega.
+ *
+ * Uma, porque resposta de campanha é uma: a migration
+ * `20260901000100_resposta_uma_por_contato` faz `registrar_resposta` guardar a
+ * PRIMEIRA e descartar o resto. O que vinha depois não respondia a disparo
+ * nenhum — era a conversa seguindo, creditada à campanha para sempre porque a
+ * busca não tinha janela nem teto.
+ *
+ * O corte continua existindo, e não virou 1 por acaso: o histórico anterior à
+ * migration não foi limpo, e sem ele um contato com 34 linhas antigas
+ * despejaria as 34 na tela.
+ */
+export const MAX_RESPOSTAS_NA_LISTA = 1;
 
 export interface ContatoDaCampanha {
   id: number;
@@ -372,10 +384,19 @@ export interface ContatoDaCampanha {
   situacao: SituacaoContato;
   /** Primeira leitura confirmada pelo WhatsApp. `null` enquanto não houve. */
   lidaEm: string | null;
-  /** Quantas mensagens o contato mandou de volta. */
+  /**
+   * Se o contato respondeu: 0 ou 1.
+   *
+   * Era "quantas mensagens ele mandou de volta", e crescia sem limite — o
+   * bate-papo dos meses seguintes ao disparo entrava aqui, porque
+   * `registrar_resposta` creditava à campanha tudo o que chegasse daquele
+   * número. Contatos com 34 "respostas" cujo texto era `[figurinha]` e `jkkkk`
+   * foram o que denunciou. Vale para o que chegou depois da migration
+   * `20260901000100`; campanhas mais antigas guardam o número inflado.
+   */
   respostas: number;
   /**
-   * O TEXTO das últimas respostas, cortado em `MAX_RESPOSTAS_NA_LISTA`.
+   * O TEXTO da resposta, cortado em `MAX_RESPOSTAS_NA_LISTA`.
    *
    * O painel contava respostas e nunca mostrava nenhuma: o texto existia em
    * `respostas_recebidas` desde a migration `20260826000100` e só saía pelo

@@ -259,10 +259,18 @@ export class CampanhasService {
    * da tabela inteira a cada troca de página. Campanha sem resposta nenhuma
    * não faz consulta.
    *
-   * Ordenada por chegada e cortada nas ÚLTIMAS: quem respondeu quinze vezes
-   * está esperando por causa da última, não da primeira — ao contrário do CSV,
-   * que guarda as primeiras porque lá a pergunta é "o que essa campanha
-   * provocou", não "o que eu preciso responder agora".
+   * Ordenada da PRIMEIRA para a última, que é o inverso do que era aqui.
+   *
+   * Enquanto toda mensagem do contato virava resposta da campanha, "a última"
+   * fazia sentido: quem escreveu quinze vezes esperava por causa da última.
+   * Desde a `20260901000100_resposta_uma_por_contato` só a primeira é gravada,
+   * e o argumento morreu com a premissa — não existe décima quinta.
+   *
+   * A ordem ainda decide o que aparece nos contatos ANTERIORES à migration,
+   * cujas linhas extras ficaram no banco. Neles a primeira é a que responde ao
+   * disparo; a última é o `vou comer` de duas semanas depois. Mostrar a
+   * primeira é o que faz histórico e dado novo quererem dizer a mesma coisa —
+   * e é também o critério do CSV, que sempre guardou as primeiras.
    */
   private async textosDasRespostas(
     campanhaId: string,
@@ -280,8 +288,8 @@ export class CampanhasService {
       // `id` desempata: o WhatsApp manda o timestamp em segundos, então duas
       // respostas seguidas têm o mesmo `recebida_em` e sem critério estável a
       // ordem muda a cada recarga da tela.
-      .order("recebida_em", { ascending: false })
-      .order("id", { ascending: false });
+      .order("recebida_em", { ascending: true })
+      .order("id", { ascending: true });
 
     /*
      * Aviso, e não exceção: a resposta é um extra da tela de contatos. Derrubar
