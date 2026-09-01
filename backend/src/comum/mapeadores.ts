@@ -231,7 +231,8 @@ export function paraSpintax(l: LinhaSpintax): Spintax {
 
 export const COLUNAS_CAMPANHA =
   "id, nome, status, lista_id, sequencia, intervalo_contatos_min, intervalo_contatos_max, " +
-  "intervalo_mensagens_min, intervalo_mensagens_max, validar_numeros, agendada_para, " +
+  "intervalo_mensagens_min, intervalo_mensagens_max, cadencia_automatica, validar_numeros, " +
+  "agendada_para, " +
   "criada_em, iniciada_em, concluida_em, template_principal, pausada_motivo, total_contatos, " +
   "total_enviadas, total_entregues, total_lidas, total_falhas, total_respostas, " +
   "listas(nome), campanha_canais(canal_id)";
@@ -246,6 +247,7 @@ export interface LinhaCampanha {
   intervalo_contatos_max: number;
   intervalo_mensagens_min: number;
   intervalo_mensagens_max: number;
+  cadencia_automatica: boolean | null;
   validar_numeros: boolean;
   agendada_para: string | null;
   criada_em: string;
@@ -283,6 +285,11 @@ function base(l: LinhaCampanha): Omit<Campanha, "sequencia"> {
       minSegundos: l.intervalo_mensagens_min,
       maxSegundos: l.intervalo_mensagens_max,
     },
+    // `?? false` cobre a campanha criada antes da coluna existir: durante o
+    // deploy da 20260901000200 o SELECT pode voltar sem ela, e `undefined` num
+    // booleano faria a tela de edição tratar como "automático" e recalcular
+    // por cima de uma faixa que alguém escolheu à mão.
+    cadenciaAutomatica: l.cadencia_automatica ?? false,
     validarNumeros: l.validar_numeros,
     agendadaPara: iso(l.agendada_para),
     criadaEm: iso(l.criada_em)!,

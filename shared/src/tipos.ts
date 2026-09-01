@@ -289,7 +289,17 @@ export interface Campanha {
   sequencia: MensagemSequencia[];
   intervaloEntreContatos: IntervaloAleatorio;
   intervaloEntreMensagens: IntervaloAleatorio;
+  /**
+   * O intervalo entre contatos saiu do tamanho da leva, não da mão de alguém.
+   *
+   * Só diz a ORIGEM do número; o valor que vale continua em
+   * `intervaloEntreContatos`. Sem este campo, a tela de edição não teria como
+   * distinguir uma faixa calculada de uma digitada, e mudar o público deixaria
+   * de recalcular sem que nada explicasse por quê.
+   */
+  cadenciaAutomatica: boolean;
   validarNumeros: boolean;
+  /** Início do disparo. Os dias seguintes vivem em `campanha_contatos.liberar_em`. */
   agendadaPara: string | null;
   criadaEm: string;
   iniciadaEm: string | null;

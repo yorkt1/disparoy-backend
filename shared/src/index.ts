@@ -9,6 +9,7 @@
 
 export * from "./tipos.js";
 export * from "./config.js";
+export * from "./cadencia.js";
 export * from "./formato.js";
 export * from "./phone.js";
 export * from "./spintax.js";

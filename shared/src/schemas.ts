@@ -99,6 +99,25 @@ export const optOutManualSchema = z.object({
 // Campanhas
 // --------------------------------------------------------------------------
 
+/**
+ * Um contato do público, com o dia em que ele entra na fila.
+ *
+ * `liberarEm` é o que permite UMA campanha cobrir a semana: nulo significa
+ * "junto com o início da campanha" (o comportamento de sempre), e uma data
+ * significa "só a partir daí". O dia mora no contato, e não numa lista de
+ * levas paralela, porque é assim que o banco guarda — `campanha_contatos.
+ * liberar_em` — e duas representações da mesma coisa são duas que divergem.
+ *
+ * Quem agrupa por dia é a TELA, sobre os valores distintos. É barato, e evita
+ * um segundo lugar onde a associação contato↔dia poderia estar errada.
+ */
+export const contatoPublicoSchema = z.object({
+  telefone: z.string().regex(/^\+[1-9][0-9]{7,14}$/, "Telefone inválido."),
+  nome: z.string().trim().max(120).default(""),
+  variaveis: z.record(z.string()).default({}),
+  liberarEm: z.string().datetime({ offset: true }).nullable().default(null),
+});
+
 export const campanhaEntradaSchema = z
   .object({
     nome: z.string().trim().min(3).max(LIMITES.maxCaracteresNomeCampanha),
@@ -108,15 +127,13 @@ export const campanhaEntradaSchema = z
      * Substituiu `listaId`: não existe mais cadastro de contatos, e a lista de
      * destino chega por planilha ou colagem no momento de criar. O telefone já
      * vem normalizado em E.164 pelo domínio, dos dois lados.
+     *
+     * Os dias de uma campanha da semana inteira vêm todos aqui, cada contato
+     * carregando seu `liberarEm`. O teto de `maxContatosPorImportacao` passa a
+     * valer para a soma dos dias, que é o que de fato entra na fila.
      */
     publico: z
-      .array(
-        z.object({
-          telefone: z.string().regex(/^\+[1-9][0-9]{7,14}$/, "Telefone inválido."),
-          nome: z.string().trim().max(120).default(""),
-          variaveis: z.record(z.string()).default({}),
-        }),
-      )
+      .array(contatoPublicoSchema)
       .min(1, "Adicione ao menos um contato à campanha.")
       .max(LIMITES.maxContatosPorImportacao),
     canaisIds: z.array(z.string().uuid()).min(1, "Selecione ao menos um canal."),
@@ -126,6 +143,15 @@ export const campanhaEntradaSchema = z
       .max(LIMITES.maxMensagensPorContato),
     intervaloEntreContatos: intervaloSchema,
     intervaloEntreMensagens: intervaloSchema,
+    /**
+     * A faixa acima foi calculada pelo tamanho da leva, não digitada.
+     *
+     * Guardado porque a edição precisa saber: sem isto, reabrir a campanha
+     * mostraria `150–180` como se alguém tivesse escolhido aqueles números, e
+     * mudar o público deixaria de recalcular. O valor efetivo continua sendo
+     * `intervaloEntreContatos` — este campo diz de onde ele veio, não o que é.
+     */
+    cadenciaAutomatica: z.boolean().default(false),
     validarNumeros: z.boolean().default(true),
     agendadaPara: z.string().datetime({ offset: true }).nullable().default(null),
     acao: z.enum(["disparar", "rascunho"]).default("rascunho"),
@@ -157,6 +183,31 @@ export const campanhaEntradaSchema = z
         message: "A data de agendamento já passou.",
       });
     }
+
+    /*
+     * Dia no passado recusado aqui, e não só na tela.
+     *
+     * `liberar_em` vencido não dá erro em lugar nenhum: o contato simplesmente
+     * entra na primeira leva, junto do dia 1. O operador que montou a semana
+     * inteira veria o dia 4 sair na segunda-feira, sem nada explicando — o
+     * mesmo modo de falha silenciosa que a recusa de `agendadaPara` já evita
+     * para o início da campanha.
+     *
+     * Só o dia mais antigo é reportado: com seis dias vencidos, seis mensagens
+     * iguais na tela não dizem mais do que uma.
+     */
+    const diaVencido = v.publico
+      .map((c) => c.liberarEm)
+      .filter((d): d is string => d !== null && new Date(d).getTime() < Date.now() - 60_000)
+      .sort()[0];
+
+    if (diaVencido) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["publico"],
+        message: `Há contatos agendados para ${new Date(diaVencido).toLocaleString("pt-BR")}, que já passou.`,
+      });
+    }
   });
 
 export type CampanhaEntrada = z.infer<typeof campanhaEntradaSchema>;
@@ -171,6 +222,7 @@ export const campanhaEdicaoSchema = z.object({
     .optional(),
   intervaloEntreContatos: intervaloSchema.optional(),
   intervaloEntreMensagens: intervaloSchema.optional(),
+  cadenciaAutomatica: z.boolean().optional(),
   validarNumeros: z.boolean().optional(),
   agendadaPara: z.string().datetime({ offset: true }).nullable().optional(),
 })

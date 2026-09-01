@@ -642,6 +642,7 @@ export class CampanhasService {
         intervalo_contatos_max: dados.intervaloEntreContatos.maxSegundos,
         intervalo_mensagens_min: dados.intervaloEntreMensagens.minSegundos,
         intervalo_mensagens_max: dados.intervaloEntreMensagens.maxSegundos,
+        cadencia_automatica: dados.cadenciaAutomatica,
         validar_numeros: dados.validarNumeros,
         agendada_para: dados.agendadaPara,
         template_principal: dados.sequencia[0]?.templateId ?? null,
@@ -754,6 +755,9 @@ export class CampanhasService {
         intervalo_contatos_max: original.intervaloEntreContatos.maxSegundos,
         intervalo_mensagens_min: original.intervaloEntreMensagens.minSegundos,
         intervalo_mensagens_max: original.intervaloEntreMensagens.maxSegundos,
+        // Copiado: é preferência de quem monta a campanha, não agendamento.
+        // A faixa em si vai junto acima, e a tela recalcula se o público mudar.
+        cadencia_automatica: original.cadenciaAutomatica,
         validar_numeros: original.validarNumeros,
         agendada_para: null,
         template_principal: original.templatePrincipal,
@@ -820,6 +824,14 @@ export class CampanhasService {
    *
    * O nome sai de `variaveis.nome` porque é lá que ele está: a RPC grava
    * `contato_id = null` e descarta o `nome` do payload (ver `mapeamentoPadrao`).
+   *
+   * `liberar_em` NÃO é lido, e a omissão é a decisão: a cópia nasce rascunho
+   * com `agendada_para = null`, então as datas do original já não valem. Levar
+   * os dias junto criaria uma campanha cujo dia 4 está no passado — e dia
+   * vencido não dá erro, o contato só entra na primeira leva. O operador
+   * duplicaria a campanha da semana passada e veria a semana inteira sair de
+   * uma vez. Sem os dias, a cópia é uma campanha de um dia só, que é o que um
+   * rascunho sem agendamento significa em todo o resto do produto.
    */
   private async publicoDaCampanha(
     id: string,
@@ -932,6 +944,9 @@ export class CampanhasService {
     if (dados.intervaloEntreMensagens) {
       atualizacao.intervalo_mensagens_min = dados.intervaloEntreMensagens.minSegundos;
       atualizacao.intervalo_mensagens_max = dados.intervaloEntreMensagens.maxSegundos;
+    }
+    if (dados.cadenciaAutomatica !== undefined) {
+      atualizacao.cadencia_automatica = dados.cadenciaAutomatica;
     }
     if (dados.validarNumeros !== undefined) atualizacao.validar_numeros = dados.validarNumeros;
     if (dados.agendadaPara !== undefined) {
