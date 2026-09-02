@@ -121,6 +121,13 @@ const ORCAMENTO: Record<string, number> = {
   /*
    * `empresas.service.ts`: a administração global de empresas. As rotas são
    * `@SomenteAdmin()` e a checagem de conta global é feita no serviço.
+   *
+   * As duas consultas varrem `perfis` e `canais` do sistema INTEIRO, de
+   * propósito: a tela responde "de quem é cada canal", e para isso precisa
+   * atravessar as empresas. Quem garante que só a conta de administração
+   * chega ali é `exigirGlobal()`, no começo de `listar()` — escopar por
+   * empresa aqui devolveria uma lista vazia, porque a conta global não
+   * pertence a nenhuma.
    */
   "empresas/empresas.service.ts": 2,
 
